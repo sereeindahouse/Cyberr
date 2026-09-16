@@ -150,7 +150,26 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
+/**
+ * The analytics <script src="%VITE_ANALYTICS_ENDPOINT%/umami"> tag renders as
+ * src="/umami" when VITE_ANALYTICS_ENDPOINT is unset — a request that 404s
+ * (or falls through to index.html and fails to parse as JS) on every page
+ * load. Strip the tag unless the endpoint is configured.
+ */
+function vitePluginAnalyticsGuard(): Plugin {
+  return {
+    name: "analytics-script-guard",
+    transformIndexHtml(html) {
+      if (process.env.VITE_ANALYTICS_ENDPOINT) return html;
+      return html.replace(
+        /<script\b[^>]*\/umami[^>]*><\/script>\s*/g,
+        ""
+      );
+    },
+  };
+}
+
+const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector(), vitePluginAnalyticsGuard()];
 
 export default defineConfig({
   plugins,

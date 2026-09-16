@@ -9,8 +9,21 @@ type MemoryDocument = Record<string, unknown>;
 function matchFilter(doc: MemoryDocument, filter: Record<string, unknown>): boolean {
   return Object.entries(filter).every(([key, expected]) => {
     if (expected === undefined) return true;
-    if (typeof expected === "object" && expected !== null && !(expected instanceof Date)) {
-      return JSON.stringify(doc[key]) === JSON.stringify(expected);
+    if (
+      typeof expected === "object" &&
+      expected !== null &&
+      !(expected instanceof Date) &&
+      !Array.isArray(expected)
+    ) {
+      // Minimal query-operator support for the in-memory fallback: { $in, $nin }
+      const value = doc[key];
+      if ("$nin" in expected) {
+        return !(expected.$nin as unknown[]).includes(value);
+      }
+      if ("$in" in expected) {
+        return (expected.$in as unknown[]).includes(value);
+      }
+      return JSON.stringify(value) === JSON.stringify(expected);
     }
     return doc[key] === expected;
   });
@@ -55,13 +68,37 @@ function createMemoryDb(): Db {
               });
               return this;
             },
-            project() {
+            project(projection: Record<string, number> = {}) {
+              const keep = Object.entries(projection)
+                .filter(([, included]) => included !== 0)
+                .map(([field]) => field);
+              const projected = working.map((doc) => {
+                if (!keep.length || keep.includes("_id")) return { ...doc };
+                const picked: MemoryDocument = {};
+                for (const field of keep) {
+                  if (field in doc) picked[field] = clone(doc[field]);
+                }
+                return picked;
+              });
+              working = projected;
               return this;
             },
+            // The real driver returns a Promise; the router code chains
+            // `.toArray().then(...)`, so the fallback must too.
             toArray() {
-              return clone(working);
+              return Promise.resolve(clone(working));
             },
           };
+        },
+        deleteMany(filter: Record<string, unknown> = {}) {
+          let deleted = 0;
+          for (const [key, doc] of Array.from(store.entries())) {
+            if (matchFilter(doc, filter)) {
+              store.delete(key);
+              deleted += 1;
+            }
+          }
+          return { acknowledged: true, deletedCount: deleted };
         },
         updateOne(filter: Record<string, unknown>, update: { $set?: Record<string, unknown> }, options?: { upsert?: boolean }) {
           const existing = Array.from(store.values()).find((doc) => matchFilter(doc, filter));
@@ -95,6 +132,18 @@ function createMemoryDb(): Db {
 
 function getMongoUri() {
   return process.env.MONGODB_URI;
+}
+
+export type MongoBackend = "memory" | "mongodb";
+
+/**
+ * Which storage backend report data currently lives in.
+ * "memory" means MONGODB_URI is unset and everything is in-process RAM —
+ * it does NOT survive a restart, and the client should say "local" not
+ * "cloud connected".
+ */
+export async function getMongoBackend(): Promise<MongoBackend> {
+  return getMongoUri() ? "mongodb" : "memory";
 }
 
 export async function getMongoDb(): Promise<Db | null> {

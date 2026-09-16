@@ -42,6 +42,10 @@ import {
   X,
 } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
+import { startLogin } from "@/const";
+import { useAuth } from "@/_core/hooks/useAuth";
 import {
   importedKnowledgeNotes,
   importedKnowledgePlaybooks,
@@ -390,8 +394,45 @@ function readReports(): Report[] {
   }
 }
 
+/** "Sep 14, 2026" — the date format the rest of the app and exports expect. */
+export function formatReportDate(date: Date): string {
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/** Best-effort parse of the display date format; null when unparseable. */
+export function parseReportDate(value: string): Date | null {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+let localStorageFullWarned = false;
+
+/**
+ * localStorage.setItem throws QuotaExceededError once the ~5 MB budget is
+ * exhausted (the imported knowledge base alone is ~0.5 MB; a few screenshot
+ * attachments fill the rest). Throwing inside a React effect crashes the
+ * whole app into the error boundary, so catch and warn once instead.
+ */
+function safeSetItem(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    console.error(`[Storage] Failed to persist "${key}" to localStorage`, error);
+    if (!localStorageFullWarned) {
+      localStorageFullWarned = true;
+      toast.warning(
+        "Локал хадгалалт дүүрэн — хамгийн найдвартай хадгалалт нь клауд синхрончлол."
+      );
+    }
+  }
+}
+
 function saveReports(reports: Report[]) {
-  localStorage.setItem("operator-dossier-reports", JSON.stringify(reports));
+  safeSetItem("operator-dossier-reports", JSON.stringify(reports));
 }
 
 function readTasks(): TaskItem[] {
@@ -404,7 +445,7 @@ function readTasks(): TaskItem[] {
 }
 
 function saveTasks(tasks: TaskItem[]) {
-  localStorage.setItem("operator-dossier-tasks", JSON.stringify(tasks));
+  safeSetItem("operator-dossier-tasks", JSON.stringify(tasks));
 }
 
 function readPlaybooks(): PlaybookItem[] {
@@ -496,7 +537,7 @@ function parseObsidianMarkdown(
     tags: tags.length ? tags : ["obsidian-import"],
     status: "Draft",
     readTime: `${estimatedMin < 10 ? "0" : ""}${estimatedMin} min`,
-    date: getValue("date") || "Sep 14, 2026",
+    date: getValue("date") || formatReportDate(new Date()),
     excerpt: body
       .replace(/^#+\s+/gm, "")
       .replace(/\s+/g, " ")
@@ -505,16 +546,46 @@ function parseObsidianMarkdown(
   };
 }
 
+// Real Markdown rendering. The old version only understood "## " headings and
+// blank lines, so every code fence, table, list, link and <details> block in
+// the imported knowledge base rendered as raw text. Content is sanitized with
+// DOMPurify because reports can originate from Obsidian imports (untrusted).
 function MarkdownPreview({ content }: { content: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const html = useMemo(() => {
+    // async:false makes parse() return a string synchronously.
+    const raw = marked.parse(content, { gfm: true, breaks: false, async: false });
+    return DOMPurify.sanitize(String(raw), { ADD_ATTR: ["target"] });
+  }, [content]);
+
+  // Inject a copy button into every fenced code block (delegated, so it
+  // survives re-renders).
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    root.querySelectorAll("pre").forEach(pre => {
+      if (pre.querySelector(".md-copy-btn")) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "md-copy-btn";
+      btn.textContent = "Хуулах";
+      btn.addEventListener("click", () => {
+        const text = (pre.querySelector("code") ?? pre).textContent ?? "";
+        navigator.clipboard.writeText(text);
+        btn.textContent = "Хуулагдлаа!";
+        window.setTimeout(() => (btn.textContent = "Хуулах"), 1200);
+      });
+      pre.appendChild(btn);
+    });
+  }, [html]);
+
   return (
-    <div className="markdown-preview">
-      {content.split("\n").map((line, index) => {
-        if (line.startsWith("## "))
-          return <h4 key={index}>{line.replace("## ", "")}</h4>;
-        if (!line.trim()) return <div className="line-break" key={index} />;
-        return <p key={index}>{line}</p>;
-      })}
-    </div>
+    <div
+      className="markdown-preview"
+      ref={containerRef}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }
 
@@ -524,8 +595,11 @@ export default function Home() {
   const [tasks, setTasks] = useState<TaskItem[]>(readTasks);
   const [playbooks, setPlaybooks] = useState<PlaybookItem[]>(readPlaybooks);
   const [thmProgress, setThmProgress] = useState<Record<string, boolean>>(readThmProgress);
-  const [workspaceKey] = useState(() => getWorkspaceKey());
+  const [workspaceKey, setWorkspaceKey] = useState(() => getWorkspaceKey());
+  const [editingWorkspaceKey, setEditingWorkspaceKey] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState(1);
+  const { user: authUser } = useAuth();
+  const displayName = authUser?.name || "Operator";
   const [statusFilter, setStatusFilter] = useState<"All" | ReportStatus | "Archived">("All");
   const [tagFilter, setTagFilter] = useState("All");
   const [query, setQuery] = useState("");
@@ -570,18 +644,31 @@ export default function Home() {
 
   // Calendar state
   const [calMonthOffset, setCalMonthOffset] = useState(0);
-  const [selectedDay, setSelectedDay] = useState<number | null>(14);
+  const [selectedDay, setSelectedDay] = useState<number | null>(new Date().getDate());
 
   const fileInput = useRef<HTMLInputElement>(null);
   const obsidianInput = useRef<HTMLInputElement>(null);
+  const backupInput = useRef<HTMLInputElement>(null);
   const mongoHydrated = useRef(false);
+  // Set while a workspace-key switch is waiting for the new key's list.
+  // Gates the persist effect (never sync old workspace data into the new
+  // key) and the hydration merge (no cross-workspace report leakage).
+  const workspaceSwitched = useRef(false);
 
   const mongoReports = trpc.reports.list.useQuery(
     { workspaceKey },
     { retry: false }
   );
-  const persistReports = trpc.reports.upsertMany.useMutation();
+  const mongoStatus = trpc.reports.status.useQuery(undefined, { retry: false });
+  // `sync` mirrors the full workspace (upsert + delete + rebuild tags), so
+  // deletions actually propagate. The old upsert-only call made deleted
+  // reports come back on the next load.
+  const persistReports = trpc.reports.sync.useMutation();
+  const isCloudBackend = mongoStatus.data?.backend === "mongodb";
 
+  // Hydrate once the cloud list arrives. `reports` here is the initial local
+  // state: the persist effect is gated on this same ref, so nothing else can
+  // have changed it before hydration runs.
   useEffect(() => {
     if (!mongoReports.data || mongoHydrated.current) return;
     if (mongoReports.data.length) {
@@ -592,20 +679,50 @@ export default function Home() {
         source: note.source as Report["source"],
         status: note.status as ReportStatus,
       }));
+      const localOnly = reports.filter(
+        r =>
+          !remoteReports.some(report => report.id === r.id) &&
+          !imported.some(note => note.id === r.id)
+      );
       const mergedReports = [
         ...remoteReports,
         ...imported.filter(note => !remoteReports.some(report => report.id === note.id)),
+        // Keep local-only reports (e.g. created while offline) so a reload
+        // never discards unsynced work.
+        ...localOnly,
       ];
       setReports(mergedReports);
       setSelectedId(mergedReports[0]?.id || 1);
     }
     mongoHydrated.current = true;
+    // New workspace is now authoritative — re-enable persistence to it.
+    workspaceSwitched.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mongoReports.data]);
 
+  const lastSyncFailureToast = useRef(0);
   useEffect(() => {
     saveReports(reports);
-    if (mongoHydrated.current && reports.length) {
-      persistReports.mutate({ workspaceKey, reports });
+    if (mongoHydrated.current && !workspaceSwitched.current && reports.length) {
+      persistReports.mutate(
+        { workspaceKey, reports },
+        {
+          onError: (error) => {
+            // Surface sync failure once per 30 s (the effect refires on every
+            // edit, so without throttling this would spam toasts).
+            const now = Date.now();
+            if (now - lastSyncFailureToast.current < 30_000) return;
+            lastSyncFailureToast.current = now;
+            const unauthorized =
+              (error as { data?: { code?: string } })?.data?.code === "UNAUTHORIZED";
+            toast.warning(
+              unauthorized
+                ? "Клауд синхрончлол нэвтрэлт шаардана — өгөгдөл одоогоор локал хадгалагдана."
+                : `Клауд синхрончлол амжилтгүй: ${error.message?.split("\n")[0]?.slice(0, 120)}`
+            );
+          },
+        }
+      );
     }
   }, [reports, workspaceKey]);
 
@@ -762,7 +879,22 @@ export default function Home() {
 
   function handleAttachment(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) return;
+    // Screenshots are stored as base64 in localStorage AND MongoDB. Without a
+    // cap a single 10 MB screenshot bloats every sync payload and can push
+    // localStorage past its ~5 MB quota (which used to crash the app).
+    const MAX_ATTACHMENT_BYTES = 1.5 * 1024 * 1024;
+    if (!file.type.startsWith("image/")) {
+      toast.error("Зөвхөн зургын файл (PNG / JPG / WEBP) сонгоно уу");
+      return;
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      toast.error(
+        `Скриншот хэт том (max 1.5 MB, сонгосон ${Math.round(file.size / 1024 / 102.4) / 10} MB)`
+      );
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       setAttachment(String(reader.result));
@@ -823,7 +955,9 @@ export default function Home() {
         ),
         status: "Draft",
         readTime: calculatedReadTime,
-        date: "Sep 14, 2026",
+        // Real creation date — previously every new report was stamped
+        // "Sep 14, 2026".
+        date: formatReportDate(new Date()),
         excerpt: calculatedExcerpt,
         content: newContent,
         image: attachment,
@@ -886,6 +1020,104 @@ export default function Home() {
     toast.success("Бүх тайланг файлд нэгтгэн татлаа");
   }
 
+  /** Full JSON backup — the only lossless format (Markdown export drops
+   *  tasks, playbooks, THM progress and attachments). */
+  function exportBackupJson() {
+    const payload = {
+      kind: "operator-dossier-backup",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      workspaceKey,
+      reports,
+      tasks,
+      playbooks,
+      thmProgress,
+    };
+    downloadText(
+      `operator-dossier-backup-${formatReportDate(new Date()).replace(/[,\s]+/g, "-")}.json`,
+      JSON.stringify(payload, null, 2),
+      "application/json"
+    );
+    toast.success("JSON бэкап татагдаж эхэллээ");
+  }
+
+  function handleBackupImport(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result));
+        if (!data || typeof data !== "object" || !Array.isArray(data.reports)) {
+          throw new Error("invalid backup");
+        }
+        const cleanReports: Report[] = data.reports
+          .filter(
+            (r: Report) =>
+              r &&
+              typeof r.id === "number" &&
+              typeof r.title === "string" &&
+              typeof r.content === "string"
+          )
+          .map((r: Report) => ({
+            ...r,
+            tags: Array.isArray(r.tags) ? r.tags.filter((t: unknown) => typeof t === "string") : [],
+          }));
+        const ok = window.confirm(
+          `Бэкап дахь ${cleanReports.length} тайланг одоогийн өгөгдлийн сантай нэгтгэх үү?\n(давхар id-тэй тайлан бэкапаас авна)`
+        );
+        if (!ok) return;
+        setReports(current => {
+          const byId = new Map(current.map(r => [r.id, r]));
+          for (const r of cleanReports) byId.set(r.id, r);
+          return Array.from(byId.values());
+        });
+        if (Array.isArray(data.tasks)) setTasks(data.tasks);
+        if (Array.isArray(data.playbooks)) setPlaybooks(data.playbooks);
+        if (data.thmProgress && typeof data.thmProgress === "object") {
+          setThmProgress(data.thmProgress as Record<string, boolean>);
+        }
+        toast.success("Бэкап амжилттай импортлогдлоо");
+      } catch {
+        toast.error("Бэкап файл алдаатай эсвэл зөв формат биш");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function applyWorkspaceKey() {
+    if (editingWorkspaceKey === null) return;
+    const next = editingWorkspaceKey.trim();
+    // Server schema: 12–160 chars.
+    if (next.length < 12 || next.length > 160) {
+      toast.error("Ажлын түлхүүр 12–160 тэмдэгтэй байх ёстой");
+      return;
+    }
+    if (next === workspaceKey) {
+      setEditingWorkspaceKey(null);
+      return;
+    }
+    // Enter the new workspace cleanly: reset to the canonical fresh state
+    // and arm the switch guard so the current (old workspace) data is never
+    // synced into the new key before its list has been fetched.
+    setReports([
+      ...initialReports,
+      ...importedKnowledgeNotes.map(note => ({
+        ...note,
+        tags: [...note.tags],
+        source: note.source as Report["source"],
+        status: note.status as ReportStatus,
+      })),
+    ]);
+    workspaceSwitched.current = true;
+    mongoHydrated.current = false;
+    setWorkspaceKey(next);
+    localStorage.setItem("operator-dossier-workspace-key", next);
+    setEditingWorkspaceKey(null);
+    toast.success("Ажлын талбар шилжлээ — өөр төхөөрөмжөө ижил түлхүүрээр нээж синхрончилна");
+  }
+
   function exportSelectedPdf() {
     if (!selectedReport) return;
     document.body.classList.add("print-report-mode");
@@ -927,7 +1159,7 @@ export default function Home() {
         tags: parsed.tags || ["obsidian-import"],
         status: "Draft",
         readTime: parsed.readTime || "05 min",
-        date: parsed.date || "Sep 14, 2026",
+        date: parsed.date || formatReportDate(new Date()),
         excerpt: parsed.excerpt || "Obsidian-аас импорт хийсэн тэмдэглэл.",
         content: parsed.content || "",
         image: undefined,
@@ -1046,13 +1278,56 @@ export default function Home() {
     toast.success("Шинэ playbook амжилттай бүртгэгдлээ!");
   }
 
-  // Month navigation
-  const monthNames = [
-    "2026 оны 8-р сар",
-    "2026 оны 9-р сар",
-    "2026 оны 10-р сар",
-  ];
-  const currentMonthDisplay = monthNames[calMonthOffset + 1] || "2026 оны 9-р сар";
+  // Real month navigation: the displayed month is "today's month + offset".
+  // Previously this was a hardcoded 3-month array (Aug–Oct 2026) and a fixed
+  // 31+30 day grid, so the calendar never matched the actual date.
+  const now = useMemo(() => new Date(), []);
+  const displayed = useMemo(() => {
+    const base = new Date(now.getFullYear(), now.getMonth() + calMonthOffset, 1);
+    const year = base.getFullYear();
+    const month = base.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    // Monday-first offset so the grid lines up with the M T W T F S S header.
+    const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7;
+    return { year, month, daysInMonth, firstWeekday };
+  }, [now, calMonthOffset]);
+  const currentMonthDisplay = `${displayed.year} оны ${displayed.month + 1}-р сар`;
+
+  // Days that actually have a report, keyed by "YYYY-M-D".
+  const reportDays = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of reports) {
+      const d = parseReportDate(r.date);
+      if (d) set.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
+    }
+    return set;
+  }, [reports]);
+  const dayHasReport = (day: number) =>
+    reportDays.has(`${displayed.year}-${displayed.month}-${day}`);
+
+  function selectCalendarDay(day: number) {
+    setSelectedDay(day);
+    const dayReports = reports
+      .map(r => ({ r, d: parseReportDate(r.date) }))
+      .filter(
+        x =>
+          x.d &&
+          x.d.getFullYear() === displayed.year &&
+          x.d.getMonth() === displayed.month &&
+          x.d.getDate() === day
+      )
+      .sort((a, b) => b.r.id - a.r.id);
+    if (dayReports.length) {
+      setSelectedId(dayReports[0].r.id);
+      setActiveNav("Тайлан");
+      toast.info(`${displayed.month + 1}-р сарын ${day}: ${dayReports.length} тайлан олдлоо`);
+    } else {
+      toast.info(`${displayed.month + 1}-р сарын ${day}-нд тайлан байхгүй`);
+    }
+  }
+
+  const isCurrentMonth =
+    displayed.year === now.getFullYear() && displayed.month === now.getMonth();
 
   // Quick Command Palette matches
   const commandResults = useMemo(() => {
@@ -1179,10 +1454,10 @@ export default function Home() {
           onClick={() => setProfileOpen(true)}
           title="Операторын тохиргоо"
         >
-          <div className="profile-dot">O</div>
+          <div className="profile-dot">{(displayName || "O").charAt(0).toUpperCase()}</div>
           <div>
-            <strong>Operator</strong>
-            <small>Ulaanbaatar, MN</small>
+            <strong>{displayName}</strong>
+            <small>{isCloudBackend ? "Cloud sync" : "Local mode"}</small>
           </div>
           <User size={15} className="muted-icon" />
         </div>
@@ -1228,7 +1503,7 @@ export default function Home() {
                 <h4>Үйлдлийн мэдэгдэл</h4>
                 <div className="notif-row">
                   <strong>Клауд өгөгдлийн сан</strong>
-                  <span>{mongoReports.isSuccess ? "MongoDB холбогдсон, бэлэн байна." : "Локал санах ой горимд ажиллаж байна."}</span>
+                  <span>{isCloudBackend ? "MongoDB холбогдсон, бэлэн байна." : "Локал санах ой горимд ажиллаж байна — дахин ачагдвал устана."}</span>
                   <small>Системийн төлөв</small>
                 </div>
                 <div className="notif-row">
@@ -1319,26 +1594,34 @@ export default function Home() {
                     ))}
                   </div>
                   <div className="calendar-grid">
-                    <span className="muted-day">31</span>
-                    {Array.from({ length: 30 }, (_, index) => index + 1).map(day => (
-                      <span
-                        key={day}
-                        onClick={() => {
-                          setSelectedDay(day);
-                          toast.info(`9-р сарын ${day}-ны үйл ажиллагаа сонгогдлоо`);
-                        }}
-                        style={{ cursor: "pointer" }}
-                        className={
-                          day === selectedDay
-                            ? "today-day"
-                            : day === 9 || day === 21
-                              ? "marked-day"
-                              : ""
-                        }
-                      >
-                        {day}
-                      </span>
+                    {Array.from({ length: displayed.firstWeekday }).map((_, index) => (
+                      <span key={`lead-${index}`} className="muted-day" />
                     ))}
+                    {Array.from({ length: displayed.daysInMonth }, (_, index) => {
+                      const day = index + 1;
+                      const isToday = isCurrentMonth && day === now.getDate();
+                      return (
+                        <span
+                          key={day}
+                          onClick={() => selectCalendarDay(day)}
+                          style={{ cursor: "pointer" }}
+                          title={
+                            dayHasReport(day)
+                              ? "Энэ өдөр тайлан байна"
+                              : "Тайлангүй"
+                          }
+                          className={[
+                            day === selectedDay ? "today-day" : "",
+                            isToday ? "today-day" : "",
+                            dayHasReport(day) ? "marked-day" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                        >
+                          {day}
+                        </span>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -1359,7 +1642,7 @@ export default function Home() {
                 </div>
 
                 {/* Heatmap */}
-                <Heatmap />
+                <Heatmap reports={reports} />
 
                 {/* Weekly Stats */}
                 <div className="weekly-stats">
@@ -1631,11 +1914,15 @@ export default function Home() {
                   <Plus size={16} /> Шинэ тайлан
                 </button>
                 <span
-                  className={`db-status ${mongoReports.isSuccess ? "connected" : "local"}`}
-                  title={mongoReports.isSuccess ? "MongoDB Atlas тайлангуудыг синхрончилж байна" : "Локал горим"}
+                  className={`db-status ${isCloudBackend ? "connected" : "local"}`}
+                  title={
+                    isCloudBackend
+                      ? "MongoDB тайлангуудыг синхрончилж байна"
+                      : "MONGODB_URI тохирогдогүй — өгөгдөл зөвхөн процессийн санах ойнд, дахин ачагдвал устана"
+                  }
                 >
                   <Database size={13} />
-                  {mongoReports.isSuccess ? " Клауд холбогдсон" : " Локал хадгалалт"}
+                  {isCloudBackend ? " Клауд холбогдсон" : " Локал хадгалалт"}
                 </span>
               </div>
             </div>
@@ -2622,14 +2909,23 @@ export default function Home() {
             <div style={{ marginTop: 20 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 14, paddingBottom: 16, borderBottom: "1px solid var(--line)" }}>
                 <div className="top-avatar" style={{ width: 44, height: 44, fontSize: 16 }}>
-                  O
+                  {(displayName || "O").charAt(0).toUpperCase()}
                 </div>
-                <div>
-                  <h4 style={{ margin: 0, fontSize: 15 }}>Operator Dossier</h4>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <h4 style={{ margin: 0, fontSize: 15 }}>{displayName}</h4>
                   <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                    Ulaanbaatar, Mongolia • Security Analyst
+                    {authUser?.email
+                      ? authUser.email
+                      : authUser
+                        ? "Нэвтэрсэн"
+                        : "Нэвтэрээгүй — локал горим"}
                   </span>
                 </div>
+                {!authUser && (
+                  <button className="secondary-button" onClick={() => startLogin()}>
+                    Нэвтрэх
+                  </button>
+                )}
               </div>
 
               <div style={{ marginTop: 16 }}>
@@ -2637,25 +2933,89 @@ export default function Home() {
                   СИНХРОНЧЛОЛЫН ТҮЛХҮҮР
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <input
-                    readOnly
-                    value={workspaceKey}
-                    style={{
-                      flex: 1,
-                      padding: "7px 10px",
-                      font: "10px 'DM Mono', monospace",
-                      background: "#f0f4f0",
-                      border: "1px solid var(--line)",
-                      borderRadius: 4,
-                    }}
-                  />
-                  <button
-                    className="secondary-button"
-                    onClick={() => copyTextToClipboard(workspaceKey, "Ажлын түлхүүр")}
-                  >
-                    <Key size={13} /> Хуулах
-                  </button>
+                  {editingWorkspaceKey === null ? (
+                    <>
+                      <input
+                        readOnly
+                        value={workspaceKey}
+                        style={{
+                          flex: 1,
+                          padding: "7px 10px",
+                          font: "10px 'DM Mono', monospace",
+                          background: "#f0f4f0",
+                          border: "1px solid var(--line)",
+                          borderRadius: 4,
+                        }}
+                      />
+                      <button
+                        className="secondary-button"
+                        onClick={() => setEditingWorkspaceKey(workspaceKey)}
+                        title="Өөр төхөөрөмж дээр хэрэглэхийн тулд засах"
+                      >
+                        <Pencil size={13} /> Засах
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => copyTextToClipboard(workspaceKey, "Ажлын түлхүүр")}
+                      >
+                        <Key size={13} /> Хуулах
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        value={editingWorkspaceKey}
+                        onChange={e => setEditingWorkspaceKey(e.target.value)}
+                        placeholder="workspace-..."
+                        style={{
+                          flex: 1,
+                          padding: "7px 10px",
+                          font: "10px 'DM Mono', monospace",
+                          background: "#fff",
+                          border: "1px solid var(--green)",
+                          borderRadius: 4,
+                        }}
+                      />
+                      <button className="primary-button" onClick={applyWorkspaceKey}>
+                        Хадгалах
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => setEditingWorkspaceKey(null)}
+                      >
+                        Болих
+                      </button>
+                    </>
+                  )}
                 </div>
+                <p style={{ fontSize: 10, color: "var(--muted)", margin: "6px 0 0", lineHeight: 1.5 }}>
+                  Ижил түлхүүртэй төхөөрөмжүүд нэг өгөгдлийн сан хуваалцана. Түлхүүрээ
+                  хэнд ч хуваалцахгүй байгаарай — эзлэх хэн ч тайланг засч болно.
+                </p>
+              </div>
+
+              <input
+                ref={backupInput}
+                type="file"
+                accept="application/json,.json"
+                onChange={handleBackupImport}
+                hidden
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                <button
+                  className="secondary-button"
+                  onClick={exportBackupJson}
+                  title="Тайлан, даалгавар, playbook, THM прогресс — бүгд"
+                >
+                  <Download size={13} /> JSON бэкап
+                </button>
+                <button
+                  className="secondary-button"
+                  onClick={() => backupInput.current?.click()}
+                  title="JSON бэкапаас буцаах"
+                >
+                  <Upload size={13} /> Бэкап импорт
+                </button>
               </div>
 
               <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
@@ -2735,14 +3095,61 @@ export default function Home() {
   );
 }
 
-function Heatmap() {
-  const cells = Array.from({ length: 126 }, (_, index) => {
-    if (index % 19 === 0) return "heat-4";
-    if (index % 11 === 0) return "heat-3";
-    if (index % 7 === 0) return "heat-2";
-    if (index % 3 === 0) return "heat-1";
-    return "";
-  });
+// 18-week activity grid. The previous version was a fixed pseudo-random
+// pattern; now every cell reflects real report dates (a day with 1, 2, or
+// 3+ reports lights up). The decorative fallback only appears when the
+// workspace has no parseable dates at all.
+function Heatmap({ reports }: { reports: Report[] }) {
+  const cells = useMemo(() => {
+    const WEEKS = 18;
+    const DAYS_PER_WEEK = 7;
+
+    const perDay = new Map<string, number>();
+    for (const r of reports) {
+      const d = parseReportDate(r.date);
+      if (!d) continue;
+      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      perDay.set(key, (perDay.get(key) ?? 0) + 1);
+    }
+    const hasRealData = perDay.size > 0;
+
+    // Build the 18×7 grid so columns are weeks (Mon–Sun) and today lands on
+    // its correct day-of-week in the final column.
+    const today = new Date();
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const firstMondayOffset = (start.getDay() + 6) % 7; // Monday-first dow
+    // Monday of the week containing today, minus (WEEKS-1) weeks.
+    start.setDate(start.getDate() - ((WEEKS - 1) * DAYS_PER_WEEK + firstMondayOffset));
+
+    // CSS grid fills row-major (18 columns), so emit day-of-week first and
+    // week second to keep columns = weeks.
+    const out: { level: string; label: string }[] = [];
+    for (let dow = 0; dow < DAYS_PER_WEEK; dow++) {
+      for (let week = 0; week < WEEKS; week++) {
+        const date = new Date(start);
+        date.setDate(start.getDate() + week * DAYS_PER_WEEK + dow);
+        const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+        const count = perDay.get(key) ?? 0;
+        const isFuture = date > today;
+
+        let level = "";
+        let label = "Тэмдэглэлгүй";
+        if (!isFuture && count > 0) {
+          level = count >= 3 ? "heat-4" : count === 2 ? "heat-3" : "heat-1";
+          label = `Тайлан: ${count}`;
+        } else if (!isFuture && !hasRealData) {
+          const idx = out.length;
+          if (idx % 19 === 0) level = "heat-4";
+          else if (idx % 11 === 0) level = "heat-3";
+          else if (idx % 7 === 0) level = "heat-2";
+          else if (idx % 3 === 0) level = "heat-1";
+        }
+        out.push({ level, label });
+      }
+    }
+    return out;
+  }, [reports]);
+
   return (
     <div className="heatmap-card">
       <div className="heatmap-head">
@@ -2750,11 +3157,11 @@ function Heatmap() {
         <span className="mono">Сүүлийн 18 долоо хоног</span>
       </div>
       <div className="heatmap-grid">
-        {cells.map((level, index) => (
+        {cells.map((cell, index) => (
           <span
             key={index}
-            className={level}
-            title={`Идэвх: ${level ? level.replace("heat-", "Түвшин ") : "Тэмдэглэлгүй"}`}
+            className={cell.level}
+            title={cell.label}
           />
         ))}
       </div>
