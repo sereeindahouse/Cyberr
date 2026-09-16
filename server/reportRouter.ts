@@ -9,7 +9,11 @@ const statusSchema = z.enum(["Draft", "Published"]);
 // The express body limit (8 MB) is the outer bound; these make the contract
 // explicit per field.
 const reportSchema = z.object({
-  id: z.number().int().positive().max(2 ** 53 - 1),
+  id: z
+    .number()
+    .int()
+    .positive()
+    .max(2 ** 53 - 1),
   title: z.string().min(1).max(200),
   room: z.string().min(1).max(120),
   source: sourceSchema,
@@ -24,20 +28,46 @@ const reportSchema = z.object({
   // Base64 data URL for screenshots; ~1.1 MB of binary.
   image: z.string().max(1_500_000).optional(),
   archived: z.boolean().optional(),
+  // Client-reported last-modified time (ISO string). Used by `sync` to do
+  // per-report last-write-wins across devices; plain upsert paths ignore it.
+  updatedAt: z.string().min(1).max(60).optional(),
 });
 
 const workspaceSchema = z.object({ workspaceKey: z.string().min(12).max(160) });
 
-// Strip internal Mongo fields so clients never see storage internals.
-// Real Mongo documents carry an `_id` that the `StoredReport` type omits.
-function withoutMongoFields(report: StoredReport & { _id?: unknown }) {
+// What the client is allowed to see. Mongo internals (`_id`) and the
+// workspace key never leave the server; the per-report `updatedAt` IS
+// exposed on purpose — multi-device sync needs it to decide which copy of a
+// concurrently edited report is newer (AUDIT.md §5.5).
+export type PublicReport = Omit<StoredReport, "workspaceKey" | "updatedAt"> & {
+  updatedAt: string;
+};
+
+// The in-memory fallback JSON-clones documents, which turns stored Dates into
+// ISO strings; real Mongo returns Dates. Normalize before comparing/serializing.
+function asDate(value: unknown): Date {
+  const d = value instanceof Date ? value : new Date(value as string);
+  return Number.isNaN(d.getTime()) ? new Date(0) : d;
+}
+
+function toPublicReport(row: StoredReport & { _id?: unknown }): PublicReport {
   const {
     workspaceKey: _workspaceKey,
-    updatedAt: _updatedAt,
+    updatedAt,
     _id: _mongoId,
-    ...publicReport
-  } = report;
-  return publicReport;
+    ...rest
+  } = row;
+  return { ...rest, updatedAt: asDate(updatedAt).toISOString() };
+}
+
+// Strip the client-reported timestamp: the stored copy's `updatedAt` is set
+// explicitly by the mutation, never inherited from the payload.
+function toStoredFields(
+  report: z.infer<typeof reportSchema>,
+  workspaceKey: string
+): Omit<StoredReport, "updatedAt"> {
+  const { updatedAt: _clientTime, ...fields } = report;
+  return { ...fields, workspaceKey };
 }
 
 export const reportRouter = router({
@@ -52,87 +82,168 @@ export const reportRouter = router({
   list: publicProcedure.input(workspaceSchema).query(async ({ input }) => {
     const db = await getMongoDb();
     if (!db) return [];
-    const rows = await db.collection<StoredReport>("reports")
+    const rows = await db
+      .collection<StoredReport>("reports")
       .find({ workspaceKey: input.workspaceKey })
       .sort({ updatedAt: -1 })
       .toArray();
-    return rows.map(withoutMongoFields);
+    return rows.map(toPublicReport);
   }),
 
   tags: publicProcedure.input(workspaceSchema).query(async ({ input }) => {
     const db = await getMongoDb();
     if (!db) return [];
-    return db.collection<{ workspaceKey: string; tag: string }>("tags")
+    return db
+      .collection<{ workspaceKey: string; tag: string }>("tags")
       .find({ workspaceKey: input.workspaceKey })
       .sort({ tag: 1 })
       .project<{ tag: string }>({ _id: 0, tag: 1 })
       .toArray()
-      .then((rows) => rows.map((row) => row.tag));
+      .then(rows => rows.map(row => row.tag));
   }),
 
   /**
-   * Mirror the client's full workspace state into the database:
-   * upsert every report, delete reports that are no longer in the list, and
-   * rebuild the tag index from the reports that remain.
+   * Mirror the client's workspace state into the database — but with
+   * per-report last-write-wins instead of whole-workspace last-write-wins
+   * (AUDIT.md §5.5, the "real multi-device conflict handling" step):
    *
-   * The old upsert-only flow made deletions impossible (deleted reports
-   * reappeared on the next load) and let tags accumulate forever.
+   * - each incoming report carries the timestamp the client last knew for
+   *   it; if the stored copy is NEWER, the server keeps its own version and
+   *   returns it, so edits made on another device survive this sync;
+   * - deletions are tombstones: the client also sends `seenIds` (every id it
+   *   has ever known). The server deletes ids the client knows and now
+   *   dropped, but KEEPS ids the client never saw — a fresh device that just
+   *   adopted the workspace key cannot wipe the vault on its first sync;
+   * - the response is the full post-merge workspace state (with per-report
+   *   `updatedAt`) so the client adopts exactly what the server has.
+   *
+   * Legacy clients that omit `seenIds` get the old full-mirror semantics
+   * (delete everything not in the list), so the change is backward
+   * compatible.
    */
   sync: writeProcedure
     .input(
       workspaceSchema.extend({
         reports: z.array(reportSchema).max(500),
+        seenIds: z.array(z.number().int().positive()).max(2000).optional(),
       })
     )
     .mutation(async ({ input }) => {
       const db = await getMongoDb();
-      if (!db) return { persisted: false, count: 0 };
+      if (!db) {
+        return { persisted: false, count: 0, reports: [] as PublicReport[] };
+      }
 
       const reportsCollection = db.collection<StoredReport>("reports");
-      const tagsCollection = db.collection("tags");
-      const updatedAt = new Date();
-      const ids = input.reports.map(report => report.id);
+      const existingRows = await reportsCollection
+        .find({ workspaceKey: input.workspaceKey })
+        .toArray();
+      const existingById = new Map<number, StoredReport>(
+        existingRows.map(row => [row.id, row])
+      );
+      const incomingIds = new Set(input.reports.map(report => report.id));
+      const seenIds =
+        input.seenIds === undefined ? null : new Set(input.seenIds);
 
-      if (ids.length) {
-        await reportsCollection.bulkWrite(
-          input.reports.map((report) => ({
-            updateOne: {
-              filter: { workspaceKey: input.workspaceKey, id: report.id },
-              update: { $set: { ...report, workspaceKey: input.workspaceKey, updatedAt } },
-              upsert: true,
+      // 1. Accept incoming reports whose copy is at least as fresh as the
+      //    stored one. Missing timestamps (legacy clients) mean "just
+      //    changed now", which is what old upserts assumed as well.
+      const writes: Array<{
+        updateOne: {
+          filter: { workspaceKey: string; id: number };
+          update: { $set: StoredReport };
+          upsert: boolean;
+        };
+      }> = [];
+      for (const report of input.reports) {
+        let incomingAt = new Date();
+        if (report.updatedAt) {
+          const parsed = new Date(report.updatedAt);
+          if (!Number.isNaN(parsed.getTime())) incomingAt = parsed;
+        }
+        const existing = existingById.get(report.id);
+        if (
+          existing &&
+          asDate(existing.updatedAt).getTime() > incomingAt.getTime()
+        ) {
+          continue; // server keeps the newer copy; it lands in the final state
+        }
+        writes.push({
+          updateOne: {
+            filter: { workspaceKey: input.workspaceKey, id: report.id },
+            update: {
+              $set: {
+                ...toStoredFields(report, input.workspaceKey),
+                updatedAt: incomingAt,
+              },
             },
-          }))
-        );
-      }
-
-      // Delete reports that vanished from the client state. `in: []` matches
-      // nothing, so an empty list is a full workspace wipe — which is what
-      // "sync with zero reports" means.
-      if (ids.length) {
-        await reportsCollection.deleteMany({
-          workspaceKey: input.workspaceKey,
-          id: { $nin: ids },
+            upsert: true,
+          },
         });
-      } else {
-        await reportsCollection.deleteMany({ workspaceKey: input.workspaceKey });
+      }
+      if (writes.length) {
+        await reportsCollection.bulkWrite(writes);
       }
 
-      // Rebuild the tag index so removed tags stop appearing in the filter.
-      const tags = Array.from(new Set(input.reports.flatMap((report) => report.tags)));
+      // 2. Deletions. Known-and-dropped ids are real deletions; ids the
+      //    client never saw are kept (new-device safety) and returned below.
+      if (seenIds === null) {
+        // Legacy full-mirror semantics: the list is authoritative.
+        if (incomingIds.size) {
+          await reportsCollection.deleteMany({
+            workspaceKey: input.workspaceKey,
+            id: { $nin: Array.from(incomingIds) },
+          });
+        } else {
+          await reportsCollection.deleteMany({
+            workspaceKey: input.workspaceKey,
+          });
+        }
+      } else {
+        const toDelete = existingRows
+          .filter(row => !incomingIds.has(row.id) && seenIds.has(row.id))
+          .map(row => row.id);
+        if (toDelete.length) {
+          await reportsCollection.deleteMany({
+            workspaceKey: input.workspaceKey,
+            id: { $in: toDelete },
+          });
+        }
+      }
+
+      // 3. Rebuild the tag index from the FINAL state so tags of
+      //    server-kept copies (and server-only reports) keep working.
+      const finalRows = await reportsCollection
+        .find({ workspaceKey: input.workspaceKey })
+        .sort({ updatedAt: -1 })
+        .toArray();
+      const tags = Array.from(new Set(finalRows.flatMap(row => row.tags)));
+      const tagsCollection = db.collection("tags");
       await tagsCollection.deleteMany({ workspaceKey: input.workspaceKey });
       if (tags.length) {
+        const tagTime = new Date();
         await tagsCollection.bulkWrite(
-          tags.map((tag) => ({
+          tags.map(tag => ({
             updateOne: {
               filter: { workspaceKey: input.workspaceKey, tag },
-              update: { $set: { workspaceKey: input.workspaceKey, tag, updatedAt } },
+              update: {
+                $set: {
+                  workspaceKey: input.workspaceKey,
+                  tag,
+                  updatedAt: tagTime,
+                },
+              },
               upsert: true,
             },
           }))
         );
       }
 
-      return { persisted: true, count: input.reports.length };
+      return {
+        persisted: true,
+        count: finalRows.length,
+        reports: finalRows.map(toPublicReport),
+      };
     }),
 
   upsertMany: writeProcedure
@@ -149,22 +260,31 @@ export const reportRouter = router({
       const updatedAt = new Date();
 
       await reportsCollection.bulkWrite(
-        input.reports.map((report) => ({
+        input.reports.map(report => ({
           updateOne: {
             filter: { workspaceKey: input.workspaceKey, id: report.id },
-            update: { $set: { ...report, workspaceKey: input.workspaceKey, updatedAt } },
+            update: {
+              $set: {
+                ...toStoredFields(report, input.workspaceKey),
+                updatedAt,
+              } as StoredReport,
+            },
             upsert: true,
           },
         }))
       );
 
-      const tags = Array.from(new Set(input.reports.flatMap((report) => report.tags)));
+      const tags = Array.from(
+        new Set(input.reports.flatMap(report => report.tags))
+      );
       if (tags.length) {
         await tagsCollection.bulkWrite(
-          tags.map((tag) => ({
+          tags.map(tag => ({
             updateOne: {
               filter: { workspaceKey: input.workspaceKey, tag },
-              update: { $set: { workspaceKey: input.workspaceKey, tag, updatedAt } },
+              update: {
+                $set: { workspaceKey: input.workspaceKey, tag, updatedAt },
+              },
               upsert: true,
             },
           }))
@@ -181,16 +301,23 @@ export const reportRouter = router({
       const updatedAt = new Date();
       await db.collection<StoredReport>("reports").updateOne(
         { workspaceKey: input.workspaceKey, id: input.report.id },
-        { $set: { ...input.report, workspaceKey: input.workspaceKey, updatedAt } },
+        {
+          $set: {
+            ...toStoredFields(input.report, input.workspaceKey),
+            updatedAt,
+          } as StoredReport,
+        },
         { upsert: true }
       );
       const tags = Array.from(new Set(input.report.tags));
       if (tags.length) {
         await db.collection("tags").bulkWrite(
-          tags.map((tag) => ({
+          tags.map(tag => ({
             updateOne: {
               filter: { workspaceKey: input.workspaceKey, tag },
-              update: { $set: { workspaceKey: input.workspaceKey, tag, updatedAt } },
+              update: {
+                $set: { workspaceKey: input.workspaceKey, tag, updatedAt },
+              },
               upsert: true,
             },
           }))

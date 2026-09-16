@@ -9,6 +9,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { ensureMongoCollections } from "../mongodb";
+import { apiLimiter, oauthCallbackLimiter } from "../rateLimit";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -46,11 +47,21 @@ async function startServer() {
 
   const app = express();
   const server = createServer(app);
+  // The site is served behind a TLS-terminating proxy; trust exactly one
+  // hop so req.ip (rate limiting) and the cookie Secure flag (X-Forwarded-Proto)
+  // see the real client instead of the proxy. AUDIT.md S6.
+  app.set("trust proxy", 1);
   // 8 MB is generous for the report payloads this API accepts (the router
   // caps a single report at ~1.8 MB) and stops anonymous bulk-upload abuse
   // that a 50 MB limit would happily accept.
   app.use(express.json({ limit: "8mb" }));
   app.use(express.urlencoded({ limit: "8mb", extended: true }));
+  // Per-IP rate limits on every public endpoint (AUDIT.md §5.4): the tRPC
+  // API, the signed-URL proxy, and a far tighter budget for the OAuth
+  // callback which mints sessions.
+  app.use("/api", apiLimiter);
+  app.use("/manus-storage", apiLimiter);
+  app.use("/api/oauth/callback", oauthCallbackLimiter);
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   // tRPC API
