@@ -7,7 +7,8 @@ A high-density cybersecurity knowledge vault, room report management system, and
 - **Dashboard (Ерөнхий)**: Real activity calendar, report-date heatmap, task queue, and operator guidelines.
 - **Reports (Тайлан)**: Comprehensive writeups for THM, picoCTF, HTB, and Cloud security challenges with tag filtering, search, real Markdown rendering (code blocks, tables, copy buttons), and Markdown / PDF / JSON export.
 - **Playbooks (Сургалт)**: Quick reference tactics for Privilege Escalation, Packet Analysis, Cloud IAM, and Windows Event Log triage.
-- **Roadmap (Замын зураг)**: 5-stage progression tracker from Foundations to Cloud Security Architecture with a THM Free Path room tracker.
+- **Roadmap (Замын зураг)**: five parallel tracks — **THM Free Path · picoCTF / CyLab · THM Paid / AD · HTB / flAWS · OSCP / Cloud** — each with sectioned items, per-item completion, and per-track progress (data lives in `client/src/data/roadmapTracks.ts`, ready for more detailed sections).
+- **Dark theme**: dark is the default (green "operator terminal" on near-black paper); top-bar toggle switches to light, persisted per device.
 - **Obsidian Sync**: Import notes from Obsidian markdown (`.md`) files; JSON backup/restore for lossless migration.
 - **Public view**: toggle (or share a `?public=1` link) to show only Published, non-archived reports with all editing locked — a read-only view for anyone holding the link.
 - **Cloud & Local Storage**: Synchronized with MongoDB Atlas via full-workspace sync (deletions and tag changes propagate); in-process memory fallback when `MONGODB_URI` is unset — the UI says so honestly.
