@@ -153,8 +153,22 @@ class SDKServer {
     return new Map(Object.entries(parsed));
   }
 
-  private getSessionSecret() {
+  private assertSessionSecret(): Uint8Array {
     const secret = ENV.cookieSecret;
+    if (!secret) {
+      // jose refuses zero-length keys with a cryptic DOMException, and a
+      // missing secret means every session is invalid (or, if this code ever
+      // weakens, trivially forgeable). Fail loudly at the point of use.
+      throw new Error(
+        "JWT_SECRET is not configured. Set a long random secret (32+ characters) in .env."
+      );
+    }
+    if (secret.length < 32) {
+      console.error(
+        "[Auth] WARNING: JWT_SECRET is shorter than 32 characters. " +
+          "HMAC-SHA256 session tokens are forgeable with weak secrets."
+      );
+    }
     return new TextEncoder().encode(secret);
   }
 
@@ -184,7 +198,7 @@ class SDKServer {
     const issuedAt = Date.now();
     const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
     const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
-    const secretKey = this.getSessionSecret();
+    const secretKey = this.assertSessionSecret();
 
     return new SignJWT({
       openId: payload.openId,
@@ -205,7 +219,7 @@ class SDKServer {
     }
 
     try {
-      const secretKey = this.getSessionSecret();
+      const secretKey = this.assertSessionSecret();
       const { payload } = await jwtVerify(cookieValue, secretKey, {
         algorithms: ["HS256"],
       });
@@ -217,6 +231,15 @@ class SDKServer {
         !isNonEmptyString(name)
       ) {
         console.warn("[Auth] Session payload missing required fields");
+        return null;
+      }
+
+      // Reject tokens minted for a different app that happens to share the
+      // signing secret (the appId claim is the only thing that separates them).
+      if (ENV.appId && appId !== ENV.appId) {
+        console.warn(
+          `[Auth] Session appId mismatch (expected ${ENV.appId}, got ${appId})`
+        );
         return null;
       }
 

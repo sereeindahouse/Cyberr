@@ -30,18 +30,27 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
-  try {
-    await ensureMongoCollections();
-    console.log("[MongoDB] reports and tags collections are ready");
-  } catch (error) {
-    console.error("[MongoDB] Collection initialization failed:", error);
+  if (process.env.MONGODB_URI) {
+    try {
+      await ensureMongoCollections();
+      console.log("[MongoDB] reports and tags collections are ready");
+    } catch (error) {
+      console.error("[MongoDB] Collection initialization failed:", error);
+    }
+  } else {
+    console.warn(
+      "[MongoDB] MONGODB_URI is not set — reports will only live in process memory " +
+        "and are LOST ON RESTART. Set MONGODB_URI in .env for real persistence."
+    );
   }
 
   const app = express();
   const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  // 8 MB is generous for the report payloads this API accepts (the router
+  // caps a single report at ~1.8 MB) and stops anonymous bulk-upload abuse
+  // that a 50 MB limit would happily accept.
+  app.use(express.json({ limit: "8mb" }));
+  app.use(express.urlencoded({ limit: "8mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   // tRPC API

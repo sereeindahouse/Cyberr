@@ -1,8 +1,20 @@
 import type { Express } from "express";
 import { ENV } from "./env";
+import { sdk } from "./sdk";
 
 export function registerStorageProxy(app: Express) {
   app.get("/manus-storage/*", async (req, res) => {
+    // When auth is configured, anonymous visitors must not be able to mint
+    // signed S3 URLs for arbitrary storage keys.
+    if (ENV.oAuthServerUrl) {
+      try {
+        await sdk.authenticateRequest(req);
+      } catch {
+        res.status(401).send("Unauthorized");
+        return;
+      }
+    }
+
     const key = (req.params as Record<string, string>)[0];
     if (!key) {
       res.status(400).send("Missing storage key");
