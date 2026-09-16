@@ -149,5 +149,6 @@ export type StoredReport = {
   excerpt: string;
   content: string;
   image?: string;
+  archived?: boolean;
   updatedAt: Date;
 };

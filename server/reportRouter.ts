@@ -18,6 +18,7 @@ const reportSchema = z.object({
   excerpt: z.string(),
   content: z.string(),
   image: z.string().optional(),
+  archived: z.boolean().optional(),
 });
 
 const workspaceSchema = z.object({ workspaceKey: z.string().min(12).max(160) });

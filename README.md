@@ -13,3 +13,4 @@ A high-density cybersecurity knowledge vault, room report management system, and
 ## Tech Stack
 - **Frontend**: React 19, Vite, Tailwind CSS, Lucide Icons, Radix UI
 - **Backend**: Express, tRPC, MongoDB, TypeScript
+
