@@ -10,6 +10,27 @@ Status: ✅ fixed in this branch · ⚠️ recommend (not yet changed)
 
 ---
 
+## Round 2 (re-run 2026-09-16)
+
+The original round-1 branch (`arena/01a0a950-cyberr`) was merged as PR #1,
+but its follow-up commit (round-2 features) was never pushed and the branch
+was deleted. This round re-implements the documented §5 roadmap items that
+were product-safe to ship:
+
+| Item | Status | What shipped |
+| --- | --- | --- |
+| §5.2 Dead template code | ✅ | Removed `AIChatBox`, `DashboardLayout(+Skeleton)`, `Map`, `ManusDialog`, `ComponentShowcase`, `NotFound`, the `wouter` dependency + patch, and `@types/google.maps`. None were referenced by `App.tsx` (single-page `Home` app). |
+| §5.3 Publish/draft visibility | ✅ | **Public view** (top-bar toggle or `?public=1` shared link): only Published, non-archived reports are visible on every surface (list, detail, reader, calendar, heatmap, command palette), all mutations are UI-hidden AND handler-guarded (`guardPublicMode`), backup/full-Markdown export (which contain Drafts) is disabled, and the tab never writes to the workspace. The URL flag wins over the local setting, so a shared link always shows the public site. |
+| §5.4 Rate limiting | ✅ | `express-rate-limit` per IP: `/api/*` + `/manus-storage` 600 req/15 min, `/api/oauth/callback` 20 req/15 min; `app.set("trust proxy", 1)` so limits see the real client. Covered by `server/rateLimit.test.ts` (per-IP budget, 429 + draft-7 headers, window reset). |
+| §5.5 Multi-device conflicts | ✅ | `reports.sync` now does **per-report last-write-wins**: each report carries the client's last-known `updatedAt` (a per-workspace localStorage sidecar, seeded from `reports.list`, which now returns it); a newer stored copy survives and is returned. Deletions are tombstones via `seenIds` (ids the client has ever known) so a fresh device adopting the key can't wipe the vault; ids it never saw are kept and returned. The response is the full post-merge state, which the client adopts. Legacy clients (no `seenIds`/timestamps) keep the old full-mirror semantics. Covered by 5 new tests in `server/reports.sync.test.ts`. |
+| §5.1 Split `Home.tsx` | ⚠️ still open | ~3,400-line component; a full extraction is a dedicated refactoring pass (kept out of this feature round on purpose). |
+| §5.6 Rotate workspace key | ⚠️ ops task | Not code. |
+
+S6 updates from this round: `trust proxy` is now set deliberately, and rate
+limiting exists (both previously "note for the future").
+
+---
+
 ## 1. Security
 
 ### S1 — Report write API was completely unauthenticated  — **C** ✅
@@ -81,11 +102,11 @@ per-field rejection.
   copyable in the profile UI, and is now *editable* to enable cross-device
   sync). Anyone holding the key can read **everything, including Draft
   reports**. Consider a "publish" visibility split or key rotation.
-* **Cookie `secure` flag** relies on `X-Forwarded-Proto` without
-  `app.set("trust proxy", …)` — a spoofed header can only *add* `Secure`
-  (harm in practice), but behind a TLS-terminating proxy the app should set
-  `trust proxy` deliberately instead.
-* **No rate limiting** on the OAuth callback or tRPC endpoints.
+* ~~**Cookie `secure` flag** relied on `X-Forwarded-Proto` without
+  `app.set("trust proxy", …)`~~ — ✅ round 2 sets `app.set("trust proxy", 1)`
+  deliberately.
+* ~~**No rate limiting** on the OAuth callback or tRPC endpoints~~ — ✅ round 2
+  adds per-IP limits (see §5.4 above).
 * **Sessions last 1 year** with no revocation (logout only clears the
   browser cookie). Acceptable for a personal site; note for the future.
 * **`authenticateRequest` writes `lastSignedIn` to MySQL on every request**
@@ -224,18 +245,15 @@ every page load. **Fix:** Vite plugin strips the tag unless configured.
   `imageGeneration`, `voiceTranscription`, `dataApi` — template plumbing,
   unused by the current app, no findings that affect this product today.
 
-## 5. Suggested next steps (not done — product decisions)
+## 5. Suggested next steps (product decisions)
 
-1. **Split `Home.tsx`** (~3,200 lines) into components (Calendar, Heatmap,
+1. **Split `Home.tsx`** (~3,400 lines) into components (Calendar, Heatmap,
    ReportList, ReportDetail, ProfileDialog, modals) — maintainability.
-2. **Remove dead template code**: `DashboardLayout`, `AIChatBox`, `Map`,
-   `ManusDialog`, `ComponentShowcase`, `NotFound` + the `wouter` patch
-   (tree-shaken out of the bundle, but it confuses readers).
-3. **Publish/draft visibility**: today "Draft" is public to anyone with the
-   key — add a `publishedOnly` mode for public viewing.
-4. **Rate limiting** (e.g. `express-rate-limit`) on `/api/*` and the OAuth
-   callback before exposing the site further.
-5. **Real multi-device conflict handling**: sync is last-write-wins on the
-   whole workspace; per-report `updatedAt` merging would be the next step.
+   ⚠️ still open after round 2 (dedicated refactoring pass).
+2. ~~**Remove dead template code**~~ — ✅ round 2.
+3. ~~**Publish/draft visibility**~~ — ✅ round 2 (public view / `?public=1`).
+4. ~~**Rate limiting**~~ — ✅ round 2 (`express-rate-limit`, see above).
+5. ~~**Real multi-device conflict handling**~~ — ✅ round 2 (per-report
+   `updatedAt` merging + tombstone deletes in `reports.sync`).
 6. **Rotate the workspace key** once: old workspaces are still reachable by
-   their old key on any MongoDB that already has the data.
+   their old key on any MongoDB that already has the data. ⚠️ ops task.

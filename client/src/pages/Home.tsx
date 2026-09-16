@@ -14,6 +14,8 @@ import {
   Copy,
   Database,
   Download,
+  Eye,
+  EyeOff,
   FileCode,
   FileText,
   Filter,
@@ -489,6 +491,62 @@ function getWorkspaceKey() {
   return next;
 }
 
+/**
+ * Per-workspace map of report id → last server timestamp known to this
+ * device. This is what makes multi-device sync safe (AUDIT.md §5.5): the
+ * server keeps the NEWER copy of each report it receives, so the client has
+ * to present the timestamp of the copy it is sending. Stored per workspace
+ * key so switching workspaces never mixes timestamps.
+ *
+ * A deleted report stays in this map on purpose — the entry acts as a
+ * tombstone telling the server "I know this id and I dropped it", which is
+ * how deletions propagate without a fresh device wiping the vault.
+ */
+function reportMetaStorageKey(workspaceKey: string) {
+  return `operator-dossier-report-meta:${workspaceKey}`;
+}
+
+function readReportMeta(workspaceKey: string): Record<string, string> {
+  try {
+    const parsed = JSON.parse(
+      localStorage.getItem(reportMetaStorageKey(workspaceKey)) ?? "{}"
+    );
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>;
+    }
+  } catch {
+    // Corrupt meta: start over — the server's copy is authoritative anyway.
+  }
+  return {};
+}
+
+function saveReportMeta(workspaceKey: string, meta: Record<string, string>) {
+  safeSetItem(reportMetaStorageKey(workspaceKey), JSON.stringify(meta));
+}
+
+/** Stamp a locally edited report as "changed now" so the next sync wins. */
+function touchReportMeta(workspaceKey: string, id: number) {
+  const meta = readReportMeta(workspaceKey);
+  meta[String(id)] = new Date().toISOString();
+  saveReportMeta(workspaceKey, meta);
+}
+
+// Public view (?public=1 / shared link, AUDIT.md §5.3): the workspace is
+// browsable by anyone holding the link, so only Published, non-archived
+// reports are shown and every mutation is locked. The URL flag always wins
+// over the local setting — a shared link must show the public site even in
+// the owner's browser.
+const PUBLIC_VIEW_STORAGE_KEY = "operator-dossier-public-view";
+
+function initialPublicView(): boolean {
+  try {
+    if (new URLSearchParams(window.location.search).has("public")) return true;
+    return localStorage.getItem(PUBLIC_VIEW_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function reportToMarkdown(report: Report) {
   return `---\ntitle: ${report.title}\nroom: ${report.room}\nsource: ${report.source}\nstage: ${report.stage}\ntags: [${report.tags.join(", ")}]\nstatus: ${report.status}\ndate: ${report.date}\n---\n\n# ${report.title}\n\n> ${report.excerpt}\n\n${report.content}\n`;
 }
@@ -646,6 +704,35 @@ export default function Home() {
   const [calMonthOffset, setCalMonthOffset] = useState(0);
   const [selectedDay, setSelectedDay] = useState<number | null>(new Date().getDate());
 
+  // Public (shared) view mode — see initialPublicView().
+  const [publicView, setPublicView] = useState(initialPublicView);
+
+  function setPublicViewMode(next: boolean) {
+    setPublicView(next);
+    try {
+      localStorage.setItem(PUBLIC_VIEW_STORAGE_KEY, next ? "1" : "0");
+      // Keep the address bar shareable: the current link reflects the mode.
+      const url = new URL(window.location.href);
+      if (next) url.searchParams.set("public", "1");
+      else url.searchParams.delete("public");
+      window.history.replaceState(null, "", url.toString());
+    } catch {
+      // Non-fatal: mode still works in-memory for this tab.
+    }
+  }
+
+  // Single choke point so no mutation can slip through a hidden control or a
+  // keyboard shortcut while the shared link is open.
+  function guardPublicMode(): boolean {
+    if (publicView) {
+      toast.info(
+        "Нийтлэг горимд засвар хийх боломжгүй — бодит горимд буцаад засна уу."
+      );
+      return true;
+    }
+    return false;
+  }
+
   const fileInput = useRef<HTMLInputElement>(null);
   const obsidianInput = useRef<HTMLInputElement>(null);
   const backupInput = useRef<HTMLInputElement>(null);
@@ -672,18 +759,22 @@ export default function Home() {
   useEffect(() => {
     if (!mongoReports.data || mongoHydrated.current) return;
     if (mongoReports.data.length) {
-      const remoteReports = mongoReports.data as unknown as Report[];
+      const remoteReports = mongoReports.data as unknown as (Report & { updatedAt?: string })[];
       const imported = importedKnowledgeNotes.map(note => ({
         ...note,
         tags: [...note.tags],
         source: note.source as Report["source"],
         status: note.status as ReportStatus,
       }));
-      const localOnly = reports.filter(
-        r =>
-          !remoteReports.some(report => report.id === r.id) &&
-          !imported.some(note => note.id === r.id)
-      );
+      // A shared link shows the workspace as-is — never mix in this
+      // browser's local drafts into the public view.
+      const localOnly = publicView
+        ? []
+        : reports.filter(
+            r =>
+              !remoteReports.some(report => report.id === r.id) &&
+              !imported.some(note => note.id === r.id)
+          );
       const mergedReports = [
         ...remoteReports,
         ...imported.filter(note => !remoteReports.some(report => report.id === note.id)),
@@ -693,6 +784,18 @@ export default function Home() {
       ];
       setReports(mergedReports);
       setSelectedId(mergedReports[0]?.id || 1);
+      // Learn the server's per-report timestamps so a sync from this device
+      // can never blindly overwrite a newer copy made elsewhere. Only fill
+      // ids we don't already have a pending local timestamp for.
+      const meta = readReportMeta(workspaceKey);
+      let metaChanged = false;
+      for (const row of remoteReports) {
+        if (typeof row.updatedAt === "string" && !meta[String(row.id)]) {
+          meta[String(row.id)] = row.updatedAt;
+          metaChanged = true;
+        }
+      }
+      if (metaChanged) saveReportMeta(workspaceKey, meta);
     }
     mongoHydrated.current = true;
     // New workspace is now authoritative — re-enable persistence to it.
@@ -700,12 +803,72 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mongoReports.data]);
 
+  /**
+   * Adopt the post-merge workspace state the server returned (AUDIT.md §5.5):
+   * - refresh the timestamp sidecar from the response;
+   * - for reports whose server copy is newer than what this device last knew
+   *   (edited on another device), adopt the server's fields;
+   * - add server-only reports a fresh device didn't have yet.
+   */
+  function adoptSyncedState(
+    result:
+      | { persisted: boolean; count: number; reports: (Report & { updatedAt: string })[] }
+      | undefined,
+    key: string
+  ) {
+    if (!result || !result.reports.length) return;
+    const meta = readReportMeta(key);
+    const nextMeta = { ...meta };
+    let metaChanged = false;
+    for (const row of result.reports) {
+      if (nextMeta[String(row.id)] !== row.updatedAt) {
+        nextMeta[String(row.id)] = row.updatedAt;
+        metaChanged = true;
+      }
+    }
+    if (metaChanged) saveReportMeta(key, nextMeta);
+    setReports(current => {
+      let changed = false;
+      const byId = new Map<number, Report>(current.map(r => [r.id, r]));
+      for (const row of result.reports) {
+        const { updatedAt, ...serverReport } = row;
+        const local = byId.get(row.id);
+        if (!local) {
+          byId.set(row.id, serverReport as Report);
+          changed = true;
+        } else if (meta[String(row.id)] !== row.updatedAt) {
+          // Server kept a newer copy of this report — adopt it.
+          byId.set(row.id, { ...local, ...serverReport } as Report);
+          changed = true;
+        }
+      }
+      return changed ? Array.from(byId.values()) : current;
+    });
+  }
+
   const lastSyncFailureToast = useRef(0);
   useEffect(() => {
     saveReports(reports);
-    if (mongoHydrated.current && !workspaceSwitched.current && reports.length) {
+    // A shared-link visitor only browses: never let this tab write to the
+    // workspace (and never overwrite the owner's cloud state with a
+    // visitor's stale local data).
+    if (
+      mongoHydrated.current &&
+      !workspaceSwitched.current &&
+      reports.length &&
+      !publicView
+    ) {
+      const meta = readReportMeta(workspaceKey);
       persistReports.mutate(
-        { workspaceKey, reports },
+        {
+          workspaceKey,
+          reports: reports.map(report => ({
+            ...report,
+            // No local timestamp yet → "changed just now" (legacy behavior).
+            updatedAt: meta[String(report.id)] ?? new Date().toISOString(),
+          })),
+          seenIds: Object.keys(meta).map(Number).filter(Number.isFinite),
+        },
         {
           onError: (error) => {
             // Surface sync failure once per 30 s (the effect refires on every
@@ -721,10 +884,12 @@ export default function Home() {
                 : `Клауд синхрончлол амжилтгүй: ${error.message?.split("\n")[0]?.slice(0, 120)}`
             );
           },
+          onSuccess: (result) => adoptSyncedState(result, workspaceKey),
         }
       );
     }
-  }, [reports, workspaceKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reports, workspaceKey, publicView]);
 
   useEffect(() => {
     saveTasks(tasks);
@@ -760,13 +925,23 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // Public view (?public=1 / shared link) only shows Published, non-archived
+  // reports; every display surface below reads from visibleReports.
+  const visibleReports = useMemo<Report[]>(
+    () =>
+      publicView
+        ? reports.filter(report => report.status === "Published" && !report.archived)
+        : reports,
+    [reports, publicView]
+  );
+
   const availableTags = useMemo(
-    () => Array.from(new Set(reports.flatMap(report => report.tags))).sort(),
-    [reports]
+    () => Array.from(new Set(visibleReports.flatMap(report => report.tags))).sort(),
+    [visibleReports]
   );
 
   const filteredReports = useMemo<Report[]>(() => {
-    let list: Report[] = reports;
+    let list: Report[] = visibleReports;
     if (statusFilter === "Archived") {
       list = list.filter(r => r.archived);
     } else {
@@ -796,10 +971,10 @@ export default function Home() {
       if (sortMode === "readTime") return parseInt(a.readTime) - parseInt(b.readTime);
       return 0;
     });
-  }, [reports, statusFilter, tagFilter, query, sortMode]);
+  }, [visibleReports, statusFilter, tagFilter, query, sortMode]);
 
   const selectedReport =
-    reports.find(report => report.id === selectedId) || reports[0];
+    visibleReports.find(report => report.id === selectedId) || visibleReports[0];
   const publishedCount = reports.filter(
     report => report.status === "Published"
   ).length;
@@ -826,6 +1001,7 @@ export default function Home() {
 
   // Editor Actions
   function openNewReportEditor() {
+    if (guardPublicMode()) return;
     setEditingReportId(null);
     setNewTitle("");
     setNewRoom("");
@@ -852,10 +1028,12 @@ export default function Home() {
   }
 
   function toggleThmRoom(roomId: string) {
+    if (guardPublicMode()) return;
     setThmProgress(current => ({ ...current, [roomId]: !current[roomId] }));
   }
 
   function openEditReport(report: Report) {
+    if (guardPublicMode()) return;
     setEditingReportId(report.id);
     setNewTitle(report.title);
     setNewRoom(report.room);
@@ -936,6 +1114,7 @@ export default function Home() {
             : item
         )
       );
+      touchReportMeta(workspaceKey, editingReportId);
       toast.success("Тайлан амжилттай шинэчлэгдлээ!");
     } else {
       // Create new
@@ -963,6 +1142,7 @@ export default function Home() {
         image: attachment,
       };
       setReports(current => [report, ...current]);
+      touchReportMeta(workspaceKey, report.id);
       setSelectedId(report.id);
       toast.success("Шинэ тайлан амжилттай үүсгэгдлээ!");
     }
@@ -971,6 +1151,7 @@ export default function Home() {
   }
 
   function deleteReport(id: number) {
+    if (guardPublicMode()) return;
     setReports(current => {
       const next = current.filter(r => r.id !== id);
       if (selectedId === id && next.length > 0) {
@@ -984,9 +1165,11 @@ export default function Home() {
   }
 
   function archiveReport(id: number) {
+    if (guardPublicMode()) return;
     setReports(current =>
       current.map(r => (r.id === id ? { ...r, archived: !r.archived } : r))
     );
+    touchReportMeta(workspaceKey, id);
     setOptionsMenuOpen(false);
     toast.info("Тайлангийн архив төлөв шинэчлэгдлээ");
   }
@@ -1015,14 +1198,17 @@ export default function Home() {
   }
 
   function exportAllMarkdown() {
+    if (guardPublicMode()) return;
     const bundle = reports.map(reportToMarkdown).join("\n---\n\n");
     downloadText("operator-dossier-all-reports.md", bundle);
     toast.success("Бүх тайланг файлд нэгтгэн татлаа");
   }
 
   /** Full JSON backup — the only lossless format (Markdown export drops
-   *  tasks, playbooks, THM progress and attachments). */
+   *  tasks, playbooks, THM progress and attachments). Locked in public view:
+   *  a backup contains Draft reports, which visitors must not receive. */
   function exportBackupJson() {
+    if (guardPublicMode()) return;
     const payload = {
       kind: "operator-dossier-backup",
       version: 1,
@@ -1042,6 +1228,7 @@ export default function Home() {
   }
 
   function handleBackupImport(event: ChangeEvent<HTMLInputElement>) {
+    if (guardPublicMode()) return;
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
@@ -1073,6 +1260,7 @@ export default function Home() {
           for (const r of cleanReports) byId.set(r.id, r);
           return Array.from(byId.values());
         });
+        for (const r of cleanReports) touchReportMeta(workspaceKey, r.id);
         if (Array.isArray(data.tasks)) setTasks(data.tasks);
         if (Array.isArray(data.playbooks)) setPlaybooks(data.playbooks);
         if (data.thmProgress && typeof data.thmProgress === "object") {
@@ -1087,6 +1275,7 @@ export default function Home() {
   }
 
   function applyWorkspaceKey() {
+    if (guardPublicMode()) return;
     if (editingWorkspaceKey === null) return;
     const next = editingWorkspaceKey.trim();
     // Server schema: 12–160 chars.
@@ -1145,6 +1334,7 @@ export default function Home() {
   }
 
   function handleObsidianImport(event: ChangeEvent<HTMLInputElement>) {
+    if (guardPublicMode()) return;
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -1165,6 +1355,7 @@ export default function Home() {
         image: undefined,
       };
       setReports(current => [imported, ...current]);
+      touchReportMeta(workspaceKey, imported.id);
       setSelectedId(imported.id);
       setActiveNav("Тайлан");
       toast.success(`"${imported.title}" амжилттай импортлогдлоо!`);
@@ -1174,6 +1365,7 @@ export default function Home() {
   }
 
   function togglePublished(reportId: number) {
+    if (guardPublicMode()) return;
     setReports(current => {
       const updated = toggleReportStatus(current, reportId);
       const target = updated.find(r => r.id === reportId);
@@ -1188,6 +1380,7 @@ export default function Home() {
 
   // Task Actions
   function toggleTask(id: number) {
+    if (guardPublicMode()) return;
     setTasks(current =>
       current.map(t => {
         if (t.id === id) {
@@ -1201,6 +1394,7 @@ export default function Home() {
   }
 
   function addTask(group: "today" | "tomorrow" | "later") {
+    if (guardPublicMode()) return;
     if (!newTaskTitle.trim()) return;
     const newTask: TaskItem = {
       id: Date.now(),
@@ -1217,12 +1411,14 @@ export default function Home() {
   }
 
   function deleteTask(id: number) {
+    if (guardPublicMode()) return;
     setTasks(current => current.filter(t => t.id !== id));
     if (editingTaskId === id) setEditingTaskId(null);
     toast.info("Даалгавар хасагдлаа");
   }
 
   function startEditTask(task: TaskItem) {
+    if (guardPublicMode()) return;
     setEditingTaskId(task.id);
     setEditingTaskTitle(task.title);
     setEditingTaskDetail(task.detail);
@@ -1253,6 +1449,7 @@ export default function Home() {
 
   // Playbook Creator Action
   function createPlaybook() {
+    if (guardPublicMode()) return;
     if (!newPbTitle.trim()) {
       toast.error("Playbook-ийн нэр оруулна уу!");
       return;
@@ -1293,21 +1490,21 @@ export default function Home() {
   }, [now, calMonthOffset]);
   const currentMonthDisplay = `${displayed.year} оны ${displayed.month + 1}-р сар`;
 
-  // Days that actually have a report, keyed by "YYYY-M-D".
+  // Days that actually have a (visible) report, keyed by "YYYY-M-D".
   const reportDays = useMemo(() => {
     const set = new Set<string>();
-    for (const r of reports) {
+    for (const r of visibleReports) {
       const d = parseReportDate(r.date);
       if (d) set.add(`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`);
     }
     return set;
-  }, [reports]);
+  }, [visibleReports]);
   const dayHasReport = (day: number) =>
     reportDays.has(`${displayed.year}-${displayed.month}-${day}`);
 
   function selectCalendarDay(day: number) {
     setSelectedDay(day);
-    const dayReports = reports
+    const dayReports = visibleReports
       .map(r => ({ r, d: parseReportDate(r.date) }))
       .filter(
         x =>
@@ -1336,7 +1533,7 @@ export default function Home() {
     const matches: { title: string; subtitle: string; category: string; onSelect: () => void }[] = [];
 
     // Reports
-    reports.forEach(r => {
+    visibleReports.forEach(r => {
       if (r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))) {
         matches.push({
           title: r.title,
@@ -1383,7 +1580,7 @@ export default function Home() {
     });
 
     return matches;
-  }, [commandSearch, reports, playbooks, tasks]);
+  }, [commandSearch, visibleReports, playbooks, tasks]);
 
   return (
     <div className="app-shell">
@@ -1417,7 +1614,7 @@ export default function Home() {
                 <Icon size={15} />
                 <span>{item.label}</span>
                 {item.label === "Тайлан" && (
-                  <span className="nav-count">{reports.length}</span>
+                  <span className="nav-count">{visibleReports.length}</span>
                 )}
                 {item.label === "Сургалт" && (
                   <span className="nav-count">{playbooks.length}</span>
@@ -1476,6 +1673,17 @@ export default function Home() {
           </div>
           <div className="top-actions" style={{ position: "relative" }}>
             <button
+              className={`icon-button public-toggle ${publicView ? "active" : ""}`}
+              onClick={() => setPublicViewMode(!publicView)}
+              title={
+                publicView
+                  ? "Нийтлэг горим идэвхтэй — бодит горимд буцах"
+                  : "Нийтлэг горим: зөвхөн Published тайлан (link-ээр хуваалцна)"
+              }
+            >
+              {publicView ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+            <button
               className="icon-button"
               onClick={() => setCommandPaletteOpen(true)}
               title="Шуурхай хайлт (Ctrl + K)"
@@ -1520,6 +1728,20 @@ export default function Home() {
             )}
           </div>
         </header>
+
+        {/* Public (shared) view banner */}
+        {publicView && (
+          <div className="public-banner">
+            <Shield size={14} />
+            <span>
+              Нийтлэг горим — зөвхөн нийтлэгдсэн (Published) тайлангууд харагдана,
+              засвар хаалттай. Хуваалцах link: <code>?public=1</code>
+            </span>
+            <button className="quiet-button" onClick={() => setPublicViewMode(false)}>
+              Бодит горимд буцах
+            </button>
+          </div>
+        )}
 
         {/* View 1: Dashboard (Ерөнхий) */}
         {activeNav === "Ерөнхий" && (
@@ -1642,7 +1864,7 @@ export default function Home() {
                 </div>
 
                 {/* Heatmap */}
-                <Heatmap reports={reports} />
+                <Heatmap reports={visibleReports} />
 
                 {/* Weekly Stats */}
                 <div className="weekly-stats">
@@ -1699,13 +1921,15 @@ export default function Home() {
                               {grpTasks.filter(t => !t.completed).length}
                             </span>
                           </div>
-                          <button
-                            className="text-button"
-                            style={{ fontSize: 10 }}
-                            onClick={() => setAddingTaskGroup(grp)}
-                          >
-                            + Нэмэх
-                          </button>
+                          {!publicView && (
+                            <button
+                              className="text-button"
+                              style={{ fontSize: 10 }}
+                              onClick={() => setAddingTaskGroup(grp)}
+                            >
+                              + Нэмэх
+                            </button>
+                          )}
                         </div>
 
                         {grpTasks.map(task => {
@@ -1768,7 +1992,7 @@ export default function Home() {
                                 </div>
                               )}
                               {!isEditing && <span className="task-date">{task.date}</span>}
-                              {!isEditing && (
+                              {!isEditing && !publicView && (
                                 <button
                                   className="task-delete-btn"
                                   onClick={e => {
@@ -1780,7 +2004,7 @@ export default function Home() {
                                   <Pencil size={13} />
                                 </button>
                               )}
-                              {!isEditing && (
+                              {!isEditing && !publicView && (
                                 <button
                                   className="task-delete-btn"
                                   onClick={e => {
@@ -1896,23 +2120,27 @@ export default function Home() {
                 <p>Нэвтрэх туршилт, CTF болон лабын дүн шинжилгээний бүртгэлүүд.</p>
               </div>
               <div className="report-header-actions">
-                <input
-                  ref={obsidianInput}
-                  type="file"
-                  accept=".md,text/markdown"
-                  onChange={handleObsidianImport}
-                  hidden
-                />
-                <button
-                  className="secondary-button"
-                  onClick={() => obsidianInput.current?.click()}
-                  title="Obsidian-ийн .md файлыг уншиж оруулах"
-                >
-                  <Upload size={14} /> Obsidian импорт
-                </button>
-                <button className="primary-button" onClick={openNewReportEditor}>
-                  <Plus size={16} /> Шинэ тайлан
-                </button>
+                {!publicView && (
+                  <>
+                    <input
+                      ref={obsidianInput}
+                      type="file"
+                      accept=".md,text/markdown"
+                      onChange={handleObsidianImport}
+                      hidden
+                    />
+                    <button
+                      className="secondary-button"
+                      onClick={() => obsidianInput.current?.click()}
+                      title="Obsidian-ийн .md файлыг уншиж оруулах"
+                    >
+                      <Upload size={14} /> Obsidian импорт
+                    </button>
+                    <button className="primary-button" onClick={openNewReportEditor}>
+                      <Plus size={16} /> Шинэ тайлан
+                    </button>
+                  </>
+                )}
                 <span
                   className={`db-status ${isCloudBackend ? "connected" : "local"}`}
                   title={
@@ -2080,6 +2308,7 @@ export default function Home() {
                       <div className="detail-kicker">
                         {selectedReport.source} / {selectedReport.stage.toUpperCase()}
                       </div>
+                      {!publicView && (
                       <div style={{ position: "relative" }}>
                         <button
                           className="icon-button"
@@ -2128,6 +2357,7 @@ export default function Home() {
                           </div>
                         )}
                       </div>
+                      )}
                     </div>
 
                     <h2>{selectedReport.title}</h2>
@@ -2180,13 +2410,15 @@ export default function Home() {
                       >
                         <Copy size={14} /> Хуулах
                       </button>
-                      <button
-                        className="secondary-button"
-                        onClick={() => openEditReport(selectedReport)}
-                        title="Тайланг засах"
-                      >
-                        Засах
-                      </button>
+                      {!publicView && (
+                        <button
+                          className="secondary-button"
+                          onClick={() => openEditReport(selectedReport)}
+                          title="Тайланг засах"
+                        >
+                          Засах
+                        </button>
+                      )}
                       <button
                         className="secondary-button"
                         onClick={openReportReader}
@@ -2194,22 +2426,26 @@ export default function Home() {
                       >
                         <BookOpen size={14} /> Бүтэн унших
                       </button>
-                      <button
-                        className="secondary-button"
-                        onClick={() => togglePublished(selectedReport.id)}
-                      >
-                        <Check size={14} />
-                        {selectedReport.status === "Published"
-                          ? " Ноорог болгох"
-                          : " Нийтлэх"}
-                      </button>
-                      <button
-                        className="quiet-button"
-                        onClick={() => archiveReport(selectedReport.id)}
-                        title="Тайланг архивлах"
-                      >
-                        <Archive size={14} /> Архивлах
-                      </button>
+                      {!publicView && (
+                        <>
+                          <button
+                            className="secondary-button"
+                            onClick={() => togglePublished(selectedReport.id)}
+                          >
+                            <Check size={14} />
+                            {selectedReport.status === "Published"
+                              ? " Ноорог болгох"
+                              : " Нийтлэх"}
+                          </button>
+                          <button
+                            className="quiet-button"
+                            onClick={() => archiveReport(selectedReport.id)}
+                            title="Тайланг архивлах"
+                          >
+                            <Archive size={14} /> Архивлах
+                          </button>
+                        </>
+                      )}
                     </div>
                   </>
                 ) : (
@@ -2284,9 +2520,11 @@ export default function Home() {
                     <button className="export-button" onClick={() => copyMarkdownToClipboard(selectedReport)}>
                       <Copy size={14} /> Хуулах
                     </button>
-                    <button className="secondary-button" onClick={() => openEditReport(selectedReport)}>
-                      Засах
-                    </button>
+                    {!publicView && (
+                      <button className="secondary-button" onClick={() => openEditReport(selectedReport)}>
+                        Засах
+                      </button>
+                    )}
                   </div>
                 </article>
               </>
@@ -2311,12 +2549,14 @@ export default function Home() {
                 <h1>Ажиллагааны тактик &amp; Playbook</h1>
                 <p>Шалгалтын үед хэрэглэгдэх стандарт дараалал ба санамжууд.</p>
               </div>
-              <button
-                className="primary-button"
-                onClick={() => setPlaybookEditorOpen(true)}
-              >
-                <Plus size={16} /> Шинэ playbook
-              </button>
+              {!publicView && (
+                <button
+                  className="primary-button"
+                  onClick={() => setPlaybookEditorOpen(true)}
+                >
+                  <Plus size={16} /> Шинэ playbook
+                </button>
+              )}
             </div>
 
             <div className="playbook-grid">
@@ -2459,12 +2699,14 @@ export default function Home() {
                             >
                               <ArrowUpRight size={14} />
                             </a>
-                            <button
-                              className="thm-report-button"
-                              onClick={() => openRoomReportEditor(room)}
-                            >
-                              <FileText size={13} /> Report
-                            </button>
+                            {!publicView && (
+                              <button
+                                className="thm-report-button"
+                                onClick={() => openRoomReportEditor(room)}
+                              >
+                                <FileText size={13} /> Report
+                              </button>
+                            )}
                           </div>
                         );
                       })}
@@ -2852,35 +3094,39 @@ export default function Home() {
                       <span className="command-item-badge">Цэс</span>
                     </div>
                   ))}
-                  <div style={{ padding: "12px 18px 4px", fontSize: 10, color: "var(--muted)", fontWeight: 700 }}>
-                    ШУУРХАЙ ҮЙЛДЭЛ
-                  </div>
-                  <div
-                    className="command-item"
-                    onClick={() => {
-                      setCommandPaletteOpen(false);
-                      openNewReportEditor();
-                    }}
-                  >
-                    <div className="command-item-left">
-                      <Plus size={15} color="var(--green)" />
-                      <span style={{ fontSize: 12 }}>Шинэ тайлан бичих</span>
-                    </div>
-                    <span className="command-item-badge">Тайлан</span>
-                  </div>
-                  <div
-                    className="command-item"
-                    onClick={() => {
-                      setCommandPaletteOpen(false);
-                      exportAllMarkdown();
-                    }}
-                  >
-                    <div className="command-item-left">
-                      <Download size={15} color="var(--green)" />
-                      <span style={{ fontSize: 12 }}>Бүх тайланг Markdown татах</span>
-                    </div>
-                    <span className="command-item-badge">Экспорт</span>
-                  </div>
+                  {!publicView && (
+                    <>
+                      <div style={{ padding: "12px 18px 4px", fontSize: 10, color: "var(--muted)", fontWeight: 700 }}>
+                        ШУУРХАЙ ҮЙЛДЭЛ
+                      </div>
+                      <div
+                        className="command-item"
+                        onClick={() => {
+                          setCommandPaletteOpen(false);
+                          openNewReportEditor();
+                        }}
+                      >
+                        <div className="command-item-left">
+                          <Plus size={15} color="var(--green)" />
+                          <span style={{ fontSize: 12 }}>Шинэ тайлан бичих</span>
+                        </div>
+                        <span className="command-item-badge">Тайлан</span>
+                      </div>
+                      <div
+                        className="command-item"
+                        onClick={() => {
+                          setCommandPaletteOpen(false);
+                          exportAllMarkdown();
+                        }}
+                      >
+                        <div className="command-item-left">
+                          <Download size={15} color="var(--green)" />
+                          <span style={{ fontSize: 12 }}>Бүх тайланг Markdown татах</span>
+                        </div>
+                        <span className="command-item-badge">Экспорт</span>
+                      </div>
+                    </>
+                  )}
                 </>
               )}
             </div>
@@ -2947,13 +3193,15 @@ export default function Home() {
                           borderRadius: 4,
                         }}
                       />
-                      <button
-                        className="secondary-button"
-                        onClick={() => setEditingWorkspaceKey(workspaceKey)}
-                        title="Өөр төхөөрөмж дээр хэрэглэхийн тулд засах"
-                      >
-                        <Pencil size={13} /> Засах
-                      </button>
+                      {!publicView && (
+                        <button
+                          className="secondary-button"
+                          onClick={() => setEditingWorkspaceKey(workspaceKey)}
+                          title="Өөр төхөөрөмж дээр хэрэглэхийн тулд засах"
+                        >
+                          <Pencil size={13} /> Засах
+                        </button>
+                      )}
                       <button
                         className="secondary-button"
                         onClick={() => copyTextToClipboard(workspaceKey, "Ажлын түлхүүр")}
@@ -3001,22 +3249,24 @@ export default function Home() {
                 onChange={handleBackupImport}
                 hidden
               />
-              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <button
-                  className="secondary-button"
-                  onClick={exportBackupJson}
-                  title="Тайлан, даалгавар, playbook, THM прогресс — бүгд"
-                >
-                  <Download size={13} /> JSON бэкап
-                </button>
-                <button
-                  className="secondary-button"
-                  onClick={() => backupInput.current?.click()}
-                  title="JSON бэкапаас буцаах"
-                >
-                  <Upload size={13} /> Бэкап импорт
-                </button>
-              </div>
+              {!publicView && (
+                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                  <button
+                    className="secondary-button"
+                    onClick={exportBackupJson}
+                    title="Тайлан, даалгавар, playbook, THM прогресс — бүгд"
+                  >
+                    <Download size={13} /> JSON бэкап
+                  </button>
+                  <button
+                    className="secondary-button"
+                    onClick={() => backupInput.current?.click()}
+                    title="JSON бэкапаас буцаах"
+                  >
+                    <Upload size={13} /> Бэкап импорт
+                  </button>
+                </div>
+              )}
 
               <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                 <div style={{ padding: "12px", background: "#f5f7f5", borderRadius: 6 }}>
@@ -3034,15 +3284,17 @@ export default function Home() {
               </div>
 
               <div style={{ display: "flex", justifyContent: "space-between", marginTop: 24, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
-                <button
-                  className="secondary-button"
-                  onClick={() => {
-                    exportAllMarkdown();
-                    setProfileOpen(false);
-                  }}
-                >
-                  <Download size={14} /> Бүгдийг экспортлох
-                </button>
+                {!publicView && (
+                  <button
+                    className="secondary-button"
+                    onClick={() => {
+                      exportAllMarkdown();
+                      setProfileOpen(false);
+                    }}
+                  >
+                    <Download size={14} /> Бүгдийг экспортлох
+                  </button>
+                )}
                 <button
                   className="primary-button"
                   onClick={() => setProfileOpen(false)}

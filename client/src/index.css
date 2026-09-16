@@ -73,6 +73,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .icon-button:hover { background: #e9eee9; color: var(--ink); }
 .top-avatar { width: 27px; height: 27px; font-size: 10px; }
 .bell-dot { display: inline-flex; position: relative; }
+.public-toggle.active { background: #d8e5d7; color: var(--green); }
+.public-banner { display: flex; align-items: center; gap: 10px; padding: 9px 38px; border-bottom: 1px solid var(--line); background: #f0f4f0; color: var(--ink); font-size: 11px; }
+.public-banner span { flex: 1; min-width: 0; }
+.public-banner code { font: 9px 'DM Mono', monospace; background: #e2e9e2; padding: 1px 5px; border-radius: 3px; }
+.public-banner .quiet-button { min-height: 26px; padding: 0 10px; font-size: 10px; }
 .bell-dot::after { content: ''; position: absolute; top: -1px; right: -1px; width: 4px; height: 4px; border-radius: 50%; background: var(--orange); }
 
 .hero-row { display: grid; grid-template-columns: 1fr 304px; gap: 50px; padding: 58px 38px 45px; max-width: 1230px; }
