@@ -1,8 +1,8 @@
 import {
   Archive,
   ArrowLeft,
-  ArrowDownRight,
   ArrowUpRight,
+  Award,
   BookOpen,
   CalendarDays,
   Check,
@@ -11,7 +11,9 @@ import {
   ChevronRight,
   Circle,
   Clock3,
+  Compass,
   Copy,
+  Crosshair,
   Database,
   Download,
   Eye,
@@ -19,12 +21,14 @@ import {
   FileCode,
   FileText,
   Filter,
+  FlaskConical,
   FolderKanban,
   Hash,
   ImagePlus,
   Key,
   LayoutDashboard,
   Menu,
+  Moon,
   MoreHorizontal,
   Paperclip,
   Pencil,
@@ -32,9 +36,11 @@ import {
   Printer,
   RotateCcw,
   Search,
+  Server,
   Share2,
   Shield,
   Sparkles,
+  Sun,
   Target,
   Terminal,
   TerminalSquare,
@@ -48,15 +54,19 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { useTheme } from "@/contexts/ThemeContext";
 import {
   importedKnowledgeNotes,
   importedKnowledgePlaybooks,
 } from "@/data/ksKnowledge";
 import {
-  thmFreePathLevels,
-  thmFreePathRooms,
-  thmRoomUrl,
-} from "@/data/thmFreePath";
+  defaultTrackId,
+  roadmapTracks,
+  trackStats,
+  Track,
+  TrackStats,
+} from "@/data/roadmapTracks";
+import { thmFreePathRooms, thmRoomUrl } from "@/data/thmFreePath";
 import { filterReports, toggleReportStatus } from "@/lib/report-utils";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -284,48 +294,15 @@ const navItems = [
   { label: "Замын зураг", icon: Target },
 ];
 
-const roadmap = [
-  {
-    stage: "01",
-    name: "Суурь",
-    stageKey: "Foundations",
-    detail: "THM Free Path: Getting Started + Tooling",
-    levelIds: ["level-1", "level-2"],
-    active: true,
-  },
-  {
-    stage: "02",
-    name: "Бодит туршилт",
-    stageKey: "Live Fire",
-    detail: "THM Free Path: Crypto + Web",
-    levelIds: ["level-3", "level-4"],
-    active: true,
-  },
-  {
-    stage: "03",
-    name: "Гүн довтолгоо",
-    stageKey: "Deep Offensive",
-    detail: "THM Free Path: RE + Networking",
-    levelIds: ["level-5", "level-6"],
-    active: false,
-  },
-  {
-    stage: "04",
-    name: "Мэргэжлийн талбар",
-    stageKey: "Pro Arena",
-    detail: "THM Free Path: Privilege Escalation + CTF",
-    levelIds: ["level-7", "level-8"],
-    active: false,
-  },
-  {
-    stage: "05",
-    name: "Хэрэглээ",
-    stageKey: "Deployment",
-    detail: "THM Free Path: Windows",
-    levelIds: ["level-9"],
-    active: false,
-  },
-];
+// Icons for the five roadmap tracks. Track data lives in data/roadmapTracks.ts —
+// the single source of truth (more detailed sections get added there).
+const trackIcons: Record<string, typeof Compass> = {
+  "thm-free-path": Compass,
+  "pico-ctf-cylab": FlaskConical,
+  "thm-paid-ad": Server,
+  "htb-flaws": Crosshair,
+  "oscp-cloud": Award,
+};
 
 const reportTemplates = [
   {
@@ -474,13 +451,41 @@ function savePlaybooks(playbooks: PlaybookItem[]) {
   localStorage.setItem("operator-dossier-playbooks", JSON.stringify(playbooks));
 }
 
-function readThmProgress(): Record<string, boolean> {
+/**
+ * Track progress: `${trackId}:${itemId}` -> completed. All five roadmap tracks
+ * share one map. HTTP Free Path item ids equal the old room ids, so the legacy
+ * single-track store is migrated once by prefixing "thm-free-path:".
+ */
+function readTrackProgress(): Record<string, boolean> {
+  let next: Record<string, boolean> = {};
   try {
-    const saved = localStorage.getItem("operator-dossier-thm-progress");
-    return saved ? JSON.parse(saved) : {};
+    const saved = localStorage.getItem("operator-dossier-track-progress");
+    const parsed = saved ? JSON.parse(saved) : {};
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      next = parsed as Record<string, boolean>;
+    }
   } catch {
-    return {};
+    next = {};
   }
+  try {
+    const legacy = localStorage.getItem("operator-dossier-thm-progress");
+    if (legacy) {
+      const old = JSON.parse(legacy) as Record<string, boolean>;
+      if (old && typeof old === "object") {
+        for (const [roomId, done] of Object.entries(old)) {
+          const key = `thm-free-path:${roomId}`;
+          if (done && !next[key]) next[key] = true;
+        }
+      }
+    }
+  } catch {
+    // Corrupt legacy store: nothing to migrate.
+  }
+  return next;
+}
+
+function saveTrackProgress(progress: Record<string, boolean>) {
+  safeSetItem("operator-dossier-track-progress", JSON.stringify(progress));
 }
 
 function getWorkspaceKey() {
@@ -652,11 +657,15 @@ export default function Home() {
   const [reports, setReports] = useState<Report[]>(readReports);
   const [tasks, setTasks] = useState<TaskItem[]>(readTasks);
   const [playbooks, setPlaybooks] = useState<PlaybookItem[]>(readPlaybooks);
-  const [thmProgress, setThmProgress] = useState<Record<string, boolean>>(readThmProgress);
+  const [trackProgress, setTrackProgress] = useState<Record<string, boolean>>(readTrackProgress);
+  const [activeTrackId, setActiveTrackId] = useState(
+    () => localStorage.getItem("operator-dossier-active-track") || defaultTrackId
+  );
   const [workspaceKey, setWorkspaceKey] = useState(() => getWorkspaceKey());
   const [editingWorkspaceKey, setEditingWorkspaceKey] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState(1);
   const { user: authUser } = useAuth();
+  const { theme, toggleTheme } = useTheme();
   const displayName = authUser?.name || "Operator";
   const [statusFilter, setStatusFilter] = useState<"All" | ReportStatus | "Archived">("All");
   const [tagFilter, setTagFilter] = useState("All");
@@ -900,8 +909,16 @@ export default function Home() {
   }, [playbooks]);
 
   useEffect(() => {
-    localStorage.setItem("operator-dossier-thm-progress", JSON.stringify(thmProgress));
-  }, [thmProgress]);
+    saveTrackProgress(trackProgress);
+  }, [trackProgress]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("operator-dossier-active-track", activeTrackId);
+    } catch {
+      // Non-fatal: track selection just won't survive a reload.
+    }
+  }, [activeTrackId]);
 
   // Global Keyboard Shortcuts (Ctrl+K for search, Escape for closing modals)
   useEffect(() => {
@@ -979,25 +996,16 @@ export default function Home() {
     report => report.status === "Published"
   ).length;
   const completedTasksCount = tasks.filter(t => t.completed).length;
-  const uniqueThmRooms = Array.from(
-    new Map(thmFreePathRooms.map(room => [room.id, room])).values()
-  );
-  const completedThmRooms = uniqueThmRooms.filter(room => thmProgress[room.id]).length;
-  const thmProgressPercent = uniqueThmRooms.length
-    ? Math.round((completedThmRooms / uniqueThmRooms.length) * 100)
-    : 0;
-  const roadmapWithProgress = useMemo(
-    () =>
-      roadmap.map(item => {
-        const rooms = thmFreePathRooms.filter(room => item.levelIds.includes(room.levelId));
-        const completed = rooms.filter(room => thmProgress[room.id]).length;
-        return {
-          ...item,
-          progress: rooms.length ? Math.round((completed / rooms.length) * 100) : 0,
-        };
-      }),
-    [thmProgress]
-  );
+  // Per-track completion across all five roadmap tracks.
+  const trackStatsMap = useMemo(() => {
+    const map: Record<string, TrackStats> = {};
+    for (const track of roadmapTracks) {
+      map[track.id] = trackStats(track, trackProgress);
+    }
+    return map;
+  }, [trackProgress]);
+  const activeTrack: Track =
+    roadmapTracks.find(track => track.id === activeTrackId) || roadmapTracks[0];
 
   // Editor Actions
   function openNewReportEditor() {
@@ -1027,9 +1035,10 @@ export default function Home() {
     setEditorOpen(true);
   }
 
-  function toggleThmRoom(roomId: string) {
+  function toggleTrackItem(trackId: string, itemId: string) {
     if (guardPublicMode()) return;
-    setThmProgress(current => ({ ...current, [roomId]: !current[roomId] }));
+    const key = `${trackId}:${itemId}`;
+    setTrackProgress(current => ({ ...current, [key]: !current[key] }));
   }
 
   function openEditReport(report: Report) {
@@ -1217,7 +1226,7 @@ export default function Home() {
       reports,
       tasks,
       playbooks,
-      thmProgress,
+      trackProgress,
     };
     downloadText(
       `operator-dossier-backup-${formatReportDate(new Date()).replace(/[,\s]+/g, "-")}.json`,
@@ -1263,8 +1272,18 @@ export default function Home() {
         for (const r of cleanReports) touchReportMeta(workspaceKey, r.id);
         if (Array.isArray(data.tasks)) setTasks(data.tasks);
         if (Array.isArray(data.playbooks)) setPlaybooks(data.playbooks);
-        if (data.thmProgress && typeof data.thmProgress === "object") {
-          setThmProgress(data.thmProgress as Record<string, boolean>);
+        if (data.trackProgress && typeof data.trackProgress === "object") {
+          setTrackProgress(data.trackProgress as Record<string, boolean>);
+        } else if (data.thmProgress && typeof data.thmProgress === "object") {
+          // Backward-compatible: pre-Round-3 backups carry thmProgress.
+          const migrated = (data.thmProgress as Record<string, boolean>) || {};
+          setTrackProgress(current => {
+            const next = { ...current };
+            for (const [roomId, done] of Object.entries(migrated)) {
+              if (done) next[`thm-free-path:${roomId}`] = true;
+            }
+            return next;
+          });
         }
         toast.success("Бэкап амжилттай импортлогдлоо");
       } catch {
@@ -1625,28 +1644,32 @@ export default function Home() {
         </nav>
         <div className="side-section-label roadmap-label">Замын зураг</div>
         <div className="side-roadmap">
-          {roadmapWithProgress.map(item => (
-            <div
-              key={item.stage}
-              className={`side-roadmap-row clickable-card ${item.active ? "roadmap-active" : ""}`}
-              onClick={() => {
-                setTagFilter("All");
-                setStatusFilter("All");
-                setActiveNav("Тайлан");
-                toast.info(`"${item.name}" шатны тайлангуудыг шүүж байна`);
-              }}
-              title="Энэ шатны тайлангуудыг үзэх"
-            >
-              <span className="stage-number">{item.stage}</span>
-              <div>
-                <strong>{item.name}</strong>
-                <small>{item.detail}</small>
+          {roadmapTracks.map(track => {
+            const Icon = trackIcons[track.id] || Compass;
+            const stats = trackStatsMap[track.id];
+            return (
+              <div
+                key={track.id}
+                className={`side-roadmap-row clickable-card ${activeTrackId === track.id ? "roadmap-active" : ""}`}
+                onClick={() => {
+                  setActiveTrackId(track.id);
+                  setActiveNav("Замын зураг");
+                }}
+                title="Энэ track-ын дэлгэрэнгүйг харах"
+              >
+                <span className="stage-icon">
+                  <Icon size={13} />
+                </span>
+                <div>
+                  <strong>{track.name}</strong>
+                  <small>{track.detail}</small>
+                </div>
+                <span className="mini-progress">{stats.percent}%</span>
               </div>
-              <span className="mini-progress">{item.progress}%</span>
-            </div>
-          ))}
+            );
+          })}
         </div>
-        <div
+<div
           className="sidebar-footer clickable-card"
           onClick={() => setProfileOpen(true)}
           title="Операторын тохиргоо"
@@ -1682,6 +1705,13 @@ export default function Home() {
               }
             >
               {publicView ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+            <button
+              className="icon-button theme-toggle"
+              onClick={() => toggleTheme?.()}
+              title={theme === "dark" ? "Цагаан горимд шилжих" : "Бараан горимд шилжих"}
+            >
+              {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
             </button>
             <button
               className="icon-button"
@@ -2035,7 +2065,7 @@ export default function Home() {
                             />
                             <button onClick={() => addTask(grp)}>Нэмэх</button>
                             <button
-                              style={{ background: "#ccc", color: "#333" }}
+                              style={{ background: "var(--btn-soft)", color: "var(--ink)" }}
                               onClick={() => setAddingTaskGroup(null)}
                             >
                               Болих
@@ -2060,49 +2090,48 @@ export default function Home() {
               </div>
             </section>
 
-            {/* Roadmap Section */}
+            {/* Roadmap Section — five tracks */}
             <section className="roadmap-section">
               <div className="section-header">
                 <div>
-                  <div className="section-kicker">Үе шатууд</div>
+                  <div className="section-kicker">Хөгжлийн track-ууд</div>
                   <h2>Ур чадварын замын зураг</h2>
                 </div>
-                <span className="mono tiny">5 Шатлал</span>
+                <span className="mono tiny">5 Track</span>
               </div>
               <div className="roadmap-track">
-                {roadmapWithProgress.map((item, index) => (
-                  <div
-                    key={item.stage}
-                    className={`roadmap-card clickable-card ${item.active ? "is-active" : ""}`}
-                    onClick={() => {
-                      setTagFilter("All");
-                      setStatusFilter("All");
-                      setActiveNav("Тайлан");
-                      toast.info(`"${item.name}" шатны тайлангуудыг шүүж байна`);
-                    }}
-                    title="Шууд тайлан руу шилжих"
-                  >
-                    <div className="roadmap-card-top">
-                      <span>{item.stage}</span>
-                      {item.active ? (
-                        <span className="roadmap-live">Идэвхтэй</span>
-                      ) : (
-                        <span className="roadmap-lock">Түгжигдсэн</span>
-                      )}
+                {roadmapTracks.map(track => {
+                  const Icon = trackIcons[track.id] || Compass;
+                  const stats = trackStatsMap[track.id];
+                  return (
+                    <div
+                      key={track.id}
+                      className={`roadmap-card clickable-card ${activeTrackId === track.id ? "is-active" : ""}`}
+                      onClick={() => {
+                        setActiveTrackId(track.id);
+                        setActiveNav("Замын зураг");
+                      }}
+                      title="Энэ track-ын дэлгэрэнгүйг харах"
+                    >
+                      <div className="roadmap-card-top">
+                        <Icon size={13} />
+                        {stats.percent > 0 ? (
+                          <span className="roadmap-live">Эхэлсэн</span>
+                        ) : (
+                          <span className="roadmap-lock">Эхлээгүй</span>
+                        )}
+                      </div>
+                      <strong>{track.name}</strong>
+                      <small>{track.detail}</small>
+                      <div className="progress-line">
+                        <i style={{ width: `${stats.percent}%` }} />
+                      </div>
+                      <div className="progress-meta">
+                        <span>{stats.done}/{stats.total} · {stats.percent}%</span>
+                      </div>
                     </div>
-                    <strong>{item.name}</strong>
-                    <small>{item.detail}</small>
-                    <div className="progress-line">
-                      <i style={{ width: `${item.progress}%` }} />
-                    </div>
-                    <div className="progress-meta">
-                      <span>{item.progress}% Биелэлт</span>
-                      {index < roadmap.length - 1 && (
-                        <ArrowDownRight size={13} />
-                      )}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </section>
           </>
@@ -2169,7 +2198,7 @@ export default function Home() {
                     {query && (
                       <button
                         onClick={() => setQuery("")}
-                        style={{ background: "transparent", color: "#999", padding: 2 }}
+                        style={{ background: "transparent", color: "var(--muted)", padding: 2 }}
                       >
                         <X size={12} />
                       </button>
@@ -2346,7 +2375,7 @@ export default function Home() {
                             <div style={{ borderTop: "1px solid var(--line)", margin: "4px 0" }} />
                             <button
                               className="command-item"
-                              style={{ padding: "6px 10px", fontSize: 11, color: "#a13d3d" }}
+                              style={{ padding: "6px 10px", fontSize: 11, color: "var(--red)" }}
                               onClick={() => {
                                 setDeleteConfirmId(selectedReport.id);
                                 setOptionsMenuOpen(false);
@@ -2587,7 +2616,7 @@ export default function Home() {
           </section>
         )}
 
-        {/* View 4: Roadmap (Замын зураг) */}
+        {/* View 4: Roadmap (Замын зураг) — five tracks */}
         {activeNav === "Замын зураг" && (
           <section className="simple-page">
             <div className="page-title-row">
@@ -2597,109 +2626,166 @@ export default function Home() {
                 </div>
                 <h1>Мэргэжлийн замын зураг</h1>
                 <p>
-                  Суурь мэдлэгээс эхлэн клауд аюулгүй байдлын мэргэжилтэн болох
-                  5 шатлал.
+                  Таван параллель track: THM Free Path · picoCTF / CyLab · THM Paid / AD · HTB / flAWS · OSCP / Cloud.
                 </p>
               </div>
             </div>
 
-            <div className="roadmap-large">
-              {roadmapWithProgress.map(item => (
-                <div
-                  className={`roadmap-large-row clickable-card ${item.active ? "active" : ""}`}
-                  key={item.stage}
-                  onClick={() => {
-                    setTagFilter("All");
-                    setStatusFilter("All");
-                    setActiveNav("Тайлан");
-                    toast.info(`"${item.name}" шатны тайлангуудыг шүүж байна`);
-                  }}
-                  title="Энэ үе шатны холбогдох тайлангуудыг үзэх"
-                >
-                  <div className="large-stage">{item.stage}</div>
-                  <div className="large-stage-copy">
-                    <div className="large-stage-title">
-                      <h3>{item.name}</h3>
-                      <span>{item.active ? "Идэвхтэй шат" : "Түгжигдсэн"}</span>
-                    </div>
-                    <p>{item.detail}</p>
-                    <div className="progress-line">
-                      <i style={{ width: `${item.progress}%` }} />
-                    </div>
-                  </div>
-                  <div className="large-percent">{item.progress}%</div>
-                </div>
-              ))}
+            {/* Track switcher */}
+            <div className="track-switcher" role="tablist" aria-label="Roadmap track-ууд">
+              {roadmapTracks.map(track => {
+                const Icon = trackIcons[track.id] || Compass;
+                const stats = trackStatsMap[track.id];
+                return (
+                  <button
+                    key={track.id}
+                    role="tab"
+                    aria-selected={activeTrackId === track.id}
+                    className={`track-pill ${activeTrackId === track.id ? "selected" : ""}`}
+                    onClick={() => setActiveTrackId(track.id)}
+                  >
+                    <Icon size={13} />
+                    {track.name}
+                    <small>{stats.percent}%</small>
+                  </button>
+                );
+              })}
             </div>
 
+            {/* Track overview rows */}
+            <div className="roadmap-large">
+              {roadmapTracks.map(track => {
+                const Icon = trackIcons[track.id] || Compass;
+                const stats = trackStatsMap[track.id];
+                const isActive = activeTrackId === track.id;
+                return (
+                  <div
+                    className={`roadmap-large-row clickable-card ${isActive ? "active" : ""}`}
+                    key={track.id}
+                    onClick={() => setActiveTrackId(track.id)}
+                    title="Энэ track-ыг сонгох"
+                  >
+                    <div className="large-stage">
+                      <Icon size={20} />
+                    </div>
+                    <div className="large-stage-copy">
+                      <div className="large-stage-title">
+                        <h3>{track.name}</h3>
+                        <span>{stats.done}/{stats.total} дууссан</span>
+                      </div>
+                      <p>{track.detail}</p>
+                      <div className="progress-line">
+                        <i style={{ width: `${stats.percent}%` }} />
+                      </div>
+                    </div>
+                    <div className="large-percent">{stats.percent}%</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Selected track: progress summary */}
             <div className="thm-progress-summary">
               <div>
-                <div className="section-kicker">THM Free Path tracker</div>
-                <h2>{thmProgressPercent}% дууссан</h2>
-                <p>{completedThmRooms} / {uniqueThmRooms.length} unique curated room дууссан</p>
+                <div className="section-kicker">{activeTrack.name} tracker</div>
+                <h2>{trackStatsMap[activeTrack.id].percent}% дууссан</h2>
+                <p>
+                  {trackStatsMap[activeTrack.id].done} / {trackStatsMap[activeTrack.id].total} item дууссан
+                </p>
               </div>
-              <div className="thm-progress-bar" aria-label={`THM Free Path ${thmProgressPercent}% дууссан`}>
-                <i style={{ width: `${thmProgressPercent}%` }} />
+              <div
+                className="thm-progress-bar"
+                aria-label={`${activeTrack.name} ${trackStatsMap[activeTrack.id].percent}% дууссан`}
+              >
+                <i style={{ width: `${trackStatsMap[activeTrack.id].percent}%` }} />
               </div>
             </div>
 
+            {/* Selected track: sections & items */}
             <div className="thm-room-tracker">
               <div className="section-header">
                 <div>
-                  <div className="section-kicker">Room completion</div>
-                  <h2>Дуусгасан room-уудаа тэмдэглэ</h2>
+                  <div className="section-kicker">Item completion</div>
+                  <h2>Дуусгасан зүйлээ тэмдэглэ</h2>
                 </div>
-                <a
-                  className="text-button"
-                  href={"https://tryhackme.com/resources/blog/free_path"}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Албан эх сурвалж <ArrowUpRight size={14} />
-                </a>
+                {activeTrack.sourceUrl && (
+                  <a
+                    className="text-button"
+                    href={activeTrack.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Албан эх сурвалж <ArrowUpRight size={14} />
+                  </a>
+                )}
               </div>
-              {thmFreePathLevels.map(level => {
-                const levelRooms = thmFreePathRooms.filter(room => room.levelId === level.id);
-                const levelCompleted = levelRooms.filter(room => thmProgress[room.id]).length;
+              {activeTrack.sections.map((section, sectionIndex) => {
+                const sectionDone = section.items.filter(item =>
+                  trackProgress[`${activeTrack.id}:${item.id}`]
+                ).length;
                 return (
-                  <details className="thm-level" key={level.id} open={level.id === "level-1"}>
+                  <details
+                    className="thm-level"
+                    key={section.id}
+                    open={sectionIndex === 0}
+                  >
                     <summary>
                       <span>
-                        <strong>{level.label}: {level.title}</strong>
-                        <small>{levelCompleted} / {levelRooms.length} дууссан</small>
+                        <strong>{section.label}: {section.title}</strong>
+                        <small>{sectionDone} / {section.items.length} дууссан</small>
                       </span>
                       <span className="thm-level-percent">
-                        {Math.round((levelCompleted / levelRooms.length) * 100)}%
+                        {section.items.length
+                          ? Math.round((sectionDone / section.items.length) * 100)
+                          : 0}
+                        %
                       </span>
                     </summary>
                     <div className="thm-room-list">
-                      {levelRooms.map(room => {
-                        const completed = Boolean(thmProgress[room.id]);
+                      {section.items.map(item => {
+                        const key = `${activeTrack.id}:${item.id}`;
+                        const completed = Boolean(trackProgress[key]);
+                        const room = item.thmRoomId
+                          ? thmFreePathRooms.find(r => r.id === item.thmRoomId)
+                          : undefined;
                         return (
-                          <div className={`thm-room-row ${completed ? "completed" : ""}`} key={room.id}>
-                            <button
-                              className="thm-room-check"
-                              aria-label={`${room.title} ${completed ? "дууссан" : "дуусаагүй"}`}
-                              aria-pressed={completed}
-                              onClick={() => toggleThmRoom(room.id)}
-                            >
-                              {completed && <Check size={13} />}
-                            </button>
+                          <div
+                            className={`thm-room-row ${completed ? "completed" : ""}`}
+                            key={item.id}
+                          >
+                            {publicView ? (
+                              <span className="thm-room-check" aria-hidden>
+                                {completed && <Check size={13} />}
+                              </span>
+                            ) : (
+                              <button
+                                className="thm-room-check"
+                                aria-label={`${item.title} ${completed ? "дууссан" : "дуусаагүй"}`}
+                                aria-pressed={completed}
+                                onClick={() => toggleTrackItem(activeTrack.id, item.id)}
+                              >
+                                {completed && <Check size={13} />}
+                              </button>
+                            )}
                             <div className="thm-room-copy">
-                              <strong>{room.title}</strong>
-                              <small>tryhackme.com/room/{room.slug}</small>
+                              <strong>{item.title}</strong>
+                              {room && (
+                                <small>tryhackme.com/room/{room.slug}</small>
+                              )}
                             </div>
-                            <a
-                              className="icon-button"
-                              href={thmRoomUrl(room.slug)}
-                              target="_blank"
-                              rel="noreferrer"
-                              title="THM room нээх"
-                              onClick={event => event.stopPropagation()}
-                            >
-                              <ArrowUpRight size={14} />
-                            </a>
-                            {!publicView && (
+                            {item.url && (
+                              <a
+                                className="icon-button"
+                                href={item.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="Нээх"
+                                onClick={event => event.stopPropagation()}
+                              >
+                                <ArrowUpRight size={14} />
+                              </a>
+                            )}
+                            {room && !publicView && (
                               <button
                                 className="thm-report-button"
                                 onClick={() => openRoomReportEditor(room)}
@@ -2888,7 +2974,7 @@ export default function Home() {
               </h4>
               <div
                 style={{
-                  background: "#f3f6f3",
+                  background: "var(--block-bg)",
                   padding: "12px 14px",
                   borderRadius: 6,
                   whiteSpace: "pre-line",
@@ -3188,7 +3274,7 @@ export default function Home() {
                           flex: 1,
                           padding: "7px 10px",
                           font: "10px 'DM Mono', monospace",
-                          background: "#f0f4f0",
+                          background: "var(--input)",
                           border: "1px solid var(--line)",
                           borderRadius: 4,
                         }}
@@ -3219,7 +3305,7 @@ export default function Home() {
                           flex: 1,
                           padding: "7px 10px",
                           font: "10px 'DM Mono', monospace",
-                          background: "#fff",
+                          background: "var(--white)",
                           border: "1px solid var(--green)",
                           borderRadius: 4,
                         }}
@@ -3269,13 +3355,13 @@ export default function Home() {
               )}
 
               <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                <div style={{ padding: "12px", background: "#f5f7f5", borderRadius: 6 }}>
+                <div style={{ padding: "12px", background: "var(--surface)", borderRadius: 6 }}>
                   <span style={{ fontSize: 10, color: "var(--muted)" }}>Нийт тайлан</span>
                   <strong style={{ display: "block", fontSize: 18, marginTop: 4 }}>
                     {reports.length}
                   </strong>
                 </div>
-                <div style={{ padding: "12px", background: "#f5f7f5", borderRadius: 6 }}>
+                <div style={{ padding: "12px", background: "var(--surface)", borderRadius: 6 }}>
                   <span style={{ fontSize: 10, color: "var(--muted)" }}>Биелсэн даалгавар</span>
                   <strong style={{ display: "block", fontSize: 18, marginTop: 4, color: "var(--green)" }}>
                     {completedTasksCount} / {tasks.length}
@@ -3334,7 +3420,7 @@ export default function Home() {
               </button>
               <button
                 className="primary-button"
-                style={{ background: "#a13d3d", borderColor: "#a13d3d" }}
+                style={{ background: "var(--red)", borderColor: "var(--red)" }}
                 onClick={() => deleteReport(deleteConfirmId)}
               >
                 Устгах

@@ -3,7 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <meta name="theme-color" content="#f7f8f5" />
+    <meta name="theme-color" content="#0c110d" />
+    <script>
+      // Apply the saved theme before first paint to avoid a flash. Dark is the
+      // default; only an explicit "light" choice opts out.
+      try {
+        var t = localStorage.getItem("theme");
+        if (t !== "light") document.documentElement.classList.add("dark");
+      } catch (e) {}
+    </script>
     <meta name="description" content="Operator Dossier — a high-density knowledge vault for cyber operations learning." />
     <title>Operator Dossier</title>
   </head>
