@@ -13,7 +13,10 @@ A high-density cybersecurity knowledge vault, room report management system, and
 - **Public view**: toggle (or share a `?public=1` link) to show only Published, non-archived reports with all editing locked — a read-only view for anyone holding the link.
 - **Cloud & Local Storage**: Synchronized with MongoDB Atlas via full-workspace sync (deletions and tag changes propagate); in-process memory fallback when `MONGODB_URI` is unset — the UI says so honestly.
 - **Multi-device sync**: per-report last-write-wins by timestamp — concurrently edited reports don't clobber each other, deletions are tombstones, and a fresh device adopting the key can't wipe the vault.
+- **Knowledge Atlas (Атлас)**: every report, roadmap track and shared tag on one interactive SVG concept map — pan/zoom, source + text filters, click a node to focus it, double-click (or the button) to open the report/track.
+- **Document-to-Diagram (Диаграм)**: a report rendered as a **mind-map** (heading tree), **flowchart** (ordered steps) or **network** (concepts + co-occurrence links); a roadmap track rendered as a **tree** (track → sections → items). Zoom, pan and one-click **SVG export**.
 - **Workspace keys**: editable sync key lets multiple devices share one vault.
+- **Optional AI analysis**: diagrams can be annotated by a deterministic local analyzer (default, no network). Set `MOONSHOT_API_URL` + `MOONSHOT_API_KEY` to upgrade to Moonshot/Kimi — the key stays in the gitignored `.env`.
 
 ## Security model
 
