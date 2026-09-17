@@ -257,3 +257,26 @@ every page load. **Fix:** Vite plugin strips the tag unless configured.
    `updatedAt` merging + tombstone deletes in `reports.sync`).
 6. **Rotate the workspace key** once: old workspaces are still reachable by
    their old key on any MongoDB that already has the data. ⚠️ ops task.
+
+## Round 6 (2026-09-17) — Second Brain
+
+New surface, all verified with `tsc --noEmit`, `vitest` (shared 46 · server
+semantic/openrouter 11 · client vault 6, plus the pre-existing suites) and
+`vite build`:
+
+* `[[wiki-links]]` (`shared/wikiLinks.ts`, `WikiMarkdown.tsx`) — rendered
+  through the existing `marked` + DOMPurify pipeline, so no new XSS vector;
+  popover previews are same-vault data only.
+* Split editor (`SplitEditor.tsx`) — 10 MB attachment cap, >1.5 MB bytes go
+  to IndexedDB (`vault.ts`) and never touch the sync payload; inline images
+  keep the 1.5 MB server cap.
+* Search 2.0 (`shared/search.ts`, `shared/embeddings.ts`) — pure functions,
+  fully offline; cloud embeddings are opt-in via
+  `OPENROUTER_EMBEDDING_MODEL` (unset = $0, local-only).
+* Offline-first vault (`client/src/lib/vault.ts`) — IndexedDB primary,
+  ≤1.5 MB localStorage mirror; legacy keys migrate once, then stay valid.
+* PWA (`client/public/sw.js`) — navigations/assets cached, `/api/*` never
+  cached (network-only + JSON 503 offline fallback), versioned cache cleanup.
+* New tRPC surface: `ai.semantic.{status,search,refresh}` — workspace-key
+  scoped like the rest of the API; `refresh` batch capped at 50, vectors
+  cached in Mongo by content hash.

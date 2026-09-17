@@ -27,6 +27,14 @@ const reportSchema = z.object({
   content: z.string().max(300_000),
   // Base64 data URL for screenshots; ~1.1 MB of binary.
   image: z.string().max(1_500_000).optional(),
+  // IndexedDB blob reference for >1.5 MB originals (local-only; the bytes
+  // never travel to the server, but the reference syncs so other devices
+  // know a screenshot exists).
+  imageRef: z.string().min(1).max(120).optional(),
+  // Roadmap track id (e.g. "thm-free-path") — drives track filters.
+  category: z.string().min(1).max(80).optional(),
+  // Original Obsidian vault path for imported notes.
+  sourcePath: z.string().min(1).max(300).optional(),
   archived: z.boolean().optional(),
   // Client-reported last-modified time (ISO string). Used by `sync` to do
   // per-report last-write-wins across devices; plain upsert paths ignore it.

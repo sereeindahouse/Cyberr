@@ -15,6 +15,11 @@ A high-density cybersecurity knowledge vault, room report management system, and
 - **Multi-device sync**: per-report last-write-wins by timestamp — concurrently edited reports don't clobber each other, deletions are tombstones, and a fresh device adopting the key can't wipe the vault.
 - **Knowledge Atlas (Атлас)**: every report, roadmap track and shared tag on one interactive SVG concept map — pan/zoom, source + text filters, click a node to focus it, double-click (or the button) to open the report/track.
 - **Document-to-Diagram (Диаграм)**: a report rendered as a **mind-map** (heading tree), **flowchart** (ordered steps) or **network** (concepts + co-occurrence links); a roadmap track rendered as a **tree** (track → sections → items). Zoom, pan and one-click **SVG export**.
+- **Wiki-links (Round 6)**: Obsidian-style `[[Title]]` / `[[Title|alias]]` links with autocomplete while typing, hover preview popovers, one-click creation of missing pages, and an automatic **Backlinks** section on every note.
+- **Split-pane editor (Round 6)**: write Markdown on the left, live preview on the right (sync-scroll), **Zen mode** for distraction-free fullscreen writing, word/character/read-time counters, `Ctrl+S` to save, up to 10 MB screenshots (oversized bytes spill to IndexedDB automatically).
+- **Multi-tab workspace (Round 6)**: VS Code style tabs (max 12, middle-click to close) preserving each tab's scroll position, persisted across reloads.
+- **Search 2.0 (Round 6)**: typo-tolerant fuzzy search with `tag:` / `stage:` / `status:` / `source:` / `date:` filters, highlighted snippets and relevance scores — plus **semantic (meaning-based) search** that runs 100% offline on local vectors, with an opt-in OpenRouter transformer upgrade (`OPENROUTER_EMBEDDING_MODEL`).
+- **Offline-first PWA (Round 6)**: the vault lives in **IndexedDB** (GB quota instead of localStorage's 5 MB), installable app shell + service worker, MongoDB auto-sync when online.
 - **Workspace keys**: editable sync key lets multiple devices share one vault.
 - **Optional AI analysis**: diagrams can be annotated by a deterministic local analyzer (default, no network). Set `MOONSHOT_API_URL` + `MOONSHOT_API_KEY` to upgrade to Moonshot/Kimi — the key stays in the gitignored `.env`.
 
