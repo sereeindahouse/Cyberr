@@ -6,6 +6,10 @@
     "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
     "noEmit": true,
     "module": "ESNext",
+    // Round 4: the atlas/diagram model iterates Map/Set and uses `u`-flag
+    // regexes (Cyrillic + emoji handling). Without an explicit target tsc
+    // defaults to ES5 syntax checking and rejects both.
+    "target": "ES2022",
     "strict": true,
     "lib": ["esnext", "dom", "dom.iterable"],
     "jsx": "preserve",

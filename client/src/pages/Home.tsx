@@ -29,6 +29,7 @@ import {
   LayoutDashboard,
   Menu,
   Moon,
+  Network,
   MoreHorizontal,
   Paperclip,
   Pencil,
@@ -47,6 +48,7 @@ import {
   Trash2,
   Upload,
   User,
+  Waypoints,
   X,
 } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -70,6 +72,18 @@ import { thmFreePathRooms, thmRoomUrl } from "@/data/thmFreePath";
 import { filterReports, toggleReportStatus } from "@/lib/report-utils";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import DocumentDiagram from "@/components/DocumentDiagram";
+import KnowledgeAtlas from "@/components/KnowledgeAtlas";
+import {
+  buildConceptNetwork,
+  buildReportDiagram,
+  buildTrackDiagram,
+  layoutGraph,
+  type DiagramKind,
+  type PositionedGraph,
+} from "@/lib/visualModel";
+// Type-only: erased at build time, so no server code reaches the browser bundle.
+import type { AnalysisResult } from "../../../server/aiAnalyzer";
 
 export type ReportStatus = "Draft" | "Published";
 export type Report = {
@@ -292,6 +306,8 @@ const navItems = [
   { label: "Тайлан", icon: FileText },
   { label: "Сургалт", icon: BookOpen },
   { label: "Замын зураг", icon: Target },
+  { label: "Атлас", icon: Network },
+  { label: "Диаграм", icon: Waypoints },
 ];
 
 // Icons for the five roadmap tracks. Track data lives in data/roadmapTracks.ts —
@@ -713,6 +729,16 @@ export default function Home() {
   const [calMonthOffset, setCalMonthOffset] = useState(0);
   const [selectedDay, setSelectedDay] = useState<number | null>(new Date().getDate());
 
+  // Round 4 — visual modules (Knowledge Atlas / Document-to-Diagram)
+  const [diagramSource, setDiagramSource] = useState<
+    { type: "report"; id: number } | { type: "track"; id: string }
+  >({ type: "report", id: 1 });
+  const [diagramKind, setDiagramKind] = useState<DiagramKind>("mindmap");
+  // Track trees can show sections only, or every single item.
+  const [trackDiagramFull, setTrackDiagramFull] = useState(false);
+  // Result of the optional AI analysis (local by default, Moonshot when set up).
+  const [aiResult, setAiResult] = useState<AnalysisResult | null>(null);
+
   // Public (shared) view mode — see initialPublicView().
   const [publicView, setPublicView] = useState(initialPublicView);
 
@@ -1006,6 +1032,82 @@ export default function Home() {
   }, [trackProgress]);
   const activeTrack: Track =
     roadmapTracks.find(track => track.id === activeTrackId) || roadmapTracks[0];
+
+  /* ---- Round 4: atlas / diagram wiring ---- */
+
+  const atlasQuery = trpc.ai.status.useQuery(undefined, { retry: false });
+  const aiAnalyze = trpc.ai.analyze.useMutation();
+
+  const diagramReport =
+    diagramSource.type === "report"
+      ? visibleReports.find(report => report.id === diagramSource.id)
+      : undefined;
+  const diagramTrack =
+    diagramSource.type === "track"
+      ? roadmapTracks.find(track => track.id === diagramSource.id)
+      : undefined;
+
+  // The AI concept map replaces the structural diagram while a result is held.
+  const diagramGraph = useMemo<PositionedGraph>(() => {
+    if (aiResult && diagramReport) {
+      return layoutGraph(
+        buildConceptNetwork({
+          id: String(diagramReport.id),
+          title: diagramReport.title,
+          concepts: aiResult.concepts,
+        }),
+        "network"
+      );
+    }
+    if (diagramReport) return buildReportDiagram(diagramReport, diagramKind);
+    if (diagramTrack) {
+      return buildTrackDiagram(diagramTrack, trackProgress, { full: trackDiagramFull });
+    }
+    return { title: "", nodes: [], edges: [], width: 0, height: 0 };
+  }, [aiResult, diagramReport, diagramKind, diagramTrack, trackProgress, trackDiagramFull]);
+
+  function openReportInReader(reportId: number) {
+    setSelectedId(reportId);
+    setActiveNav("Тайлан-уншилт");
+  }
+
+  function openTrackInRoadmap(trackId: string) {
+    setActiveTrackId(trackId);
+    setActiveNav("Замын зураг");
+  }
+
+  function openDiagramForReport(reportId: number) {
+    setAiResult(null);
+    setDiagramSource({ type: "report", id: reportId });
+    setDiagramKind("mindmap");
+    setActiveNav("Диаграм");
+  }
+
+  function openDiagramForTrack(trackId: string) {
+    setAiResult(null);
+    setDiagramSource({ type: "track", id: trackId });
+    setDiagramKind("tree");
+    setActiveNav("Диаграм");
+  }
+
+  function runAiAnalysis() {
+    if (!diagramReport) return;
+    aiAnalyze.mutate(
+      { content: diagramReport.content, maxConcepts: 9 },
+      {
+        onSuccess: result => {
+          setAiResult(result);
+          toast.success(
+            result.provider === "moonshot"
+              ? `AI шинжилгээ (${result.model}) бэлэн боллоо`
+              : "Орон нутгийн шинжилгээ бэлэн боллоо"
+          );
+          if (result.note) toast.info(result.note);
+        },
+        onError: () => toast.error("AI шинжилгээ амжилтгүй боллоо"),
+      }
+    );
+  }
 
   // Editor Actions
   function openNewReportEditor() {
@@ -2368,6 +2470,16 @@ export default function Home() {
                             <button
                               className="command-item"
                               style={{ padding: "6px 10px", fontSize: 11 }}
+                              onClick={() => {
+                                setOptionsMenuOpen(false);
+                                openDiagramForReport(selectedReport.id);
+                              }}
+                            >
+                              <span>🗺️ Диаграм болгох</span>
+                            </button>
+                            <button
+                              className="command-item"
+                              style={{ padding: "6px 10px", fontSize: 11 }}
                               onClick={() => archiveReport(selectedReport.id)}
                             >
                               <span>📦 Архивлах</span>
@@ -2549,6 +2661,12 @@ export default function Home() {
                     <button className="export-button" onClick={() => copyMarkdownToClipboard(selectedReport)}>
                       <Copy size={14} /> Хуулах
                     </button>
+                    <button
+                      className="export-button"
+                      onClick={() => openDiagramForReport(selectedReport.id)}
+                    >
+                      <Waypoints size={14} /> Диаграм
+                    </button>
                     {!publicView && (
                       <button className="secondary-button" onClick={() => openEditReport(selectedReport)}>
                         Засах
@@ -2708,16 +2826,24 @@ export default function Home() {
                   <div className="section-kicker">Item completion</div>
                   <h2>Дуусгасан зүйлээ тэмдэглэ</h2>
                 </div>
-                {activeTrack.sourceUrl && (
-                  <a
+                <div className="thm-header-actions">
+                  <button
                     className="text-button"
-                    href={activeTrack.sourceUrl}
-                    target="_blank"
-                    rel="noreferrer"
+                    onClick={() => openDiagramForTrack(activeTrack.id)}
                   >
-                    Албан эх сурвалж <ArrowUpRight size={14} />
-                  </a>
-                )}
+                    <Waypoints size={14} /> Мод диаграм
+                  </button>
+                  {activeTrack.sourceUrl && (
+                    <a
+                      className="text-button"
+                      href={activeTrack.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Албан эх сурвалж <ArrowUpRight size={14} />
+                    </a>
+                  )}
+                </div>
               </div>
               {activeTrack.sections.map((section, sectionIndex) => {
                 const sectionDone = section.items.filter(item =>
@@ -2801,6 +2927,186 @@ export default function Home() {
                 );
               })}
             </div>
+          </section>
+        )}
+
+        {/* View 6: Knowledge Atlas (Атлас) */}
+        {activeNav === "Атлас" && (
+          <section className="simple-page">
+            <div className="page-title-row">
+              <div>
+                <div className="eyebrow">
+                  <span className="signal-dot" /> Мэдлэгийн газрын зураг
+                </div>
+                <h1>Атлас</h1>
+                <p>
+                  Тайлан, roadmap track болон шошгоны хоорондох холбоосыг нэг
+                  концепт зураг дээр. Хулганы дугуйгаар томруулж, чирж шилжүүлээд
+                  зангилааг сонгон фокус хийнэ үү.
+                </p>
+              </div>
+            </div>
+            <KnowledgeAtlas
+              reports={visibleReports}
+              tracks={roadmapTracks}
+              trackProgress={trackProgress}
+              onOpenReport={openReportInReader}
+              onOpenTrack={openTrackInRoadmap}
+            />
+          </section>
+        )}
+
+        {/* View 7: Document-to-Diagram (Диаграм) */}
+        {activeNav === "Диаграм" && (
+          <section className="simple-page">
+            <div className="page-title-row">
+              <div>
+                <div className="eyebrow">
+                  <span className="signal-dot" /> Баримт бичиг → диаграм
+                </div>
+                <h1>Диаграм</h1>
+                <p>
+                  Тайланг mind-map / flowchart / network хэлбэрээр, roadmap
+                  track-ыг мод хэлбэрээр дүрсэлнэ. SVG-ээр татаж авах боломжтой.
+                </p>
+              </div>
+            </div>
+
+            <div className="diagram-source">
+              <div className="diagram-source-tabs" role="tablist" aria-label="Эх сурвалжийн төрөл">
+                <button
+                  role="tab"
+                  aria-selected={diagramSource.type === "report"}
+                  className={`track-pill ${diagramSource.type === "report" ? "selected" : ""}`}
+                  onClick={() => {
+                    setAiResult(null);
+                    setDiagramKind("mindmap");
+                    setDiagramSource({
+                      type: "report",
+                      id: selectedReport?.id ?? visibleReports[0]?.id ?? 1,
+                    });
+                  }}
+                >
+                  <FileText size={13} /> Тайлан
+                </button>
+                <button
+                  role="tab"
+                  aria-selected={diagramSource.type === "track"}
+                  className={`track-pill ${diagramSource.type === "track" ? "selected" : ""}`}
+                  onClick={() => {
+                    setAiResult(null);
+                    setDiagramKind("tree");
+                    setDiagramSource({ type: "track", id: activeTrackId });
+                  }}
+                >
+                  <Target size={13} /> Замын зураг (track)
+                </button>
+              </div>
+
+              {diagramSource.type === "report" ? (
+                <select
+                  className="diagram-select"
+                  value={diagramSource.id}
+                  onChange={event => {
+                    setAiResult(null);
+                    setDiagramSource({ type: "report", id: Number(event.target.value) });
+                  }}
+                  aria-label="Тайлан сонгох"
+                >
+                  {visibleReports.map(report => (
+                    <option key={report.id} value={report.id}>
+                      {report.title}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <>
+                  <select
+                    className="diagram-select"
+                    value={diagramSource.id}
+                    onChange={event => {
+                      setAiResult(null);
+                      setDiagramSource({ type: "track", id: event.target.value });
+                    }}
+                    aria-label="Track сонгох"
+                  >
+                    {roadmapTracks.map(track => (
+                      <option key={track.id} value={track.id}>
+                        {track.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className={`secondary-button ${trackDiagramFull ? "active" : ""}`}
+                    onClick={() => setTrackDiagramFull(current => !current)}
+                  >
+                    {trackDiagramFull ? "Зөвхөн section" : "Бүх item харуулах"}
+                  </button>
+                </>
+              )}
+            </div>
+
+            {diagramSource.type === "report" && diagramReport && (
+              <div className="diagram-ai-row">
+                <button
+                  className="export-button"
+                  onClick={runAiAnalysis}
+                  disabled={aiAnalyze.isPending}
+                >
+                  <Sparkles size={13} />
+                  {aiAnalyze.isPending ? "Шинжилж байна…" : "AI шинжилгээ"}
+                </button>
+                <span className="ai-badge">
+                  {atlasQuery.data?.configured
+                    ? `Moonshot/Kimi · ${atlasQuery.data.model}`
+                    : "Local analyzer (товчлолгүй)"}
+                </span>
+                {aiResult && (
+                  <button className="text-button" onClick={() => setAiResult(null)}>
+                    Шинжилгээг цэвэрлэх
+                  </button>
+                )}
+              </div>
+            )}
+
+            {aiResult && (
+              <div className="ai-summary-card">
+                <div className="section-kicker">
+                  AI дүгнэлт · {aiResult.provider === "moonshot" ? aiResult.model : "local"}
+                </div>
+                <p>{aiResult.summary}</p>
+                {aiResult.steps.length > 0 && (
+                  <ol className="ai-steps">
+                    {aiResult.steps.map((step, index) => (
+                      <li key={`${index}-${step}`}>{step}</li>
+                    ))}
+                  </ol>
+                )}
+                {aiResult.note && <p className="tiny">{aiResult.note}</p>}
+              </div>
+            )}
+
+            <DocumentDiagram
+              title={diagramReport?.title ?? diagramTrack?.name ?? "Диаграм"}
+              subtitle={
+                diagramReport
+                  ? `${diagramReport.source} · ${diagramReport.stage}`
+                  : "Roadmap track"
+              }
+              graph={diagramGraph}
+              kind={diagramKind}
+              kinds={
+                diagramSource.type === "report"
+                  ? ["mindmap", "flowchart", "network"]
+                  : ["tree"]
+              }
+              onKindChange={kind => {
+                setAiResult(null);
+                setDiagramKind(kind);
+              }}
+              onOpenReport={openReportInReader}
+              exportName={diagramReport?.title ?? diagramTrack?.name ?? "diagram"}
+            />
           </section>
         )}
       </main>

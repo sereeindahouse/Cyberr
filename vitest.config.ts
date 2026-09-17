@@ -14,6 +14,14 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["server/**/*.test.ts", "server/**/*.spec.ts"],
+    include: [
+      "server/**/*.test.ts",
+      "server/**/*.spec.ts",
+      // Round 4: the atlas/diagram model is framework-free, so the pure
+      // client-side graph + layout code is covered by the same runner.
+      "client/**/*.test.ts",
+      "client/**/*.spec.ts",
+      "shared/**/*.test.ts",
+    ],
   },
 });

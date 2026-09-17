@@ -2,6 +2,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router } from "./_core/trpc";
+import { aiRouter } from "./aiRouter";
 import { reportRouter } from "./reportRouter";
 
 export const appRouter = router({
@@ -19,6 +20,9 @@ export const appRouter = router({
   }),
 
   reports: reportRouter,
+
+  // Round 4 — optional AI analyzer for the atlas / diagram modules.
+  ai: aiRouter,
 
   // TODO: add feature routers here, e.g.
   // todo: router({
