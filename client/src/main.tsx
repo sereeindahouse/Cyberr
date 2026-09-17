@@ -79,3 +79,13 @@ createRoot(document.getElementById("root")!).render(
     </QueryClientProvider>
   </trpc.Provider>
 );
+
+// Offline-first PWA shell: cache the app shell + assets so the IndexedDB
+// vault boots without network. API calls are never cached (see sw.js).
+if ("serviceWorker" in navigator && import.meta.env.PROD) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(error => {
+      console.warn("[PWA] service worker registration failed:", error);
+    });
+  });
+}

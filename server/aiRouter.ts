@@ -6,6 +6,7 @@ import { getInsights, relatedReports } from "./insights";
 import { groqConfig } from "./groq";
 import { openRouterConfig } from "./openrouter";
 import { runChat, type ChatTurn, type KnowledgeSnippet } from "./knowledgeChat";
+import { getSemanticStatus, refreshCloudVectors, searchSemantic } from "./semantic";
 
 const workspaceSchema = z.object({
   workspaceKey: z.string().min(12).max(160),
@@ -101,6 +102,32 @@ export const aiRouter = router({
       const result = await getInsights(input.workspaceKey, { force: true });
       return result.snapshot;
     }),
+  }),
+
+  // Second Brain — semantic (meaning-based) search over the synced
+  // workspace. Local hash vectors always work; OpenRouter transformer
+  // embeddings upgrade the ranking when configured.
+  semantic: router({
+    status: publicProcedure.input(workspaceSchema).query(async ({ input }) => {
+      return getSemanticStatus(input.workspaceKey);
+    }),
+
+    search: publicProcedure
+      .input(
+        workspaceSchema.extend({
+          query: z.string().min(1).max(500),
+          limit: z.number().int().min(1).max(50).optional(),
+        })
+      )
+      .query(async ({ input }) => {
+        return searchSemantic(input.workspaceKey, input.query, { limit: input.limit });
+      }),
+
+    refresh: publicProcedure
+      .input(workspaceSchema.extend({ batch: z.number().int().min(1).max(50).optional() }))
+      .mutation(async ({ input }) => {
+        return refreshCloudVectors(input.workspaceKey, { batch: input.batch });
+      }),
   }),
 
   // Round 6 — Operator Assistant chatbot: Groq (fast reply) + Gemini

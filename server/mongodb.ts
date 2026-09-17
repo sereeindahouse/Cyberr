@@ -169,7 +169,7 @@ export async function ensureMongoCollections(): Promise<void> {
   const db = await getMongoDb();
   if (!db) return;
 
-  for (const name of ["reports", "tags"]) {
+  for (const name of ["reports", "tags", "vectors"]) {
     try {
       await db.createCollection(name);
     } catch (error) {
@@ -182,6 +182,7 @@ export async function ensureMongoCollections(): Promise<void> {
   await db.collection("reports").createIndex({ workspaceKey: 1, id: 1 }, { unique: true });
   await db.collection("reports").createIndex({ workspaceKey: 1, updatedAt: -1 });
   await db.collection("tags").createIndex({ workspaceKey: 1, tag: 1 }, { unique: true });
+  await db.collection("vectors").createIndex({ workspaceKey: 1, id: 1, model: 1 }, { unique: true });
 }
 
 export type StoredReport = {
@@ -198,6 +199,9 @@ export type StoredReport = {
   excerpt: string;
   content: string;
   image?: string;
+  imageRef?: string;
+  category?: string;
+  sourcePath?: string;
   archived?: boolean;
   updatedAt: Date;
 };
