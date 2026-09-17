@@ -38,6 +38,7 @@ export type DocumentDiagramProps = {
   kinds?: DiagramKind[];
   onKindChange?: (kind: DiagramKind) => void;
   onOpenReport?: (reportId: number) => void;
+  onOpenTrack?: (trackId: string) => void;
   /** Extra buttons (e.g. the optional AI analysis) rendered in the header. */
   actions?: ReactNode;
   exportName?: string;
@@ -60,6 +61,7 @@ export default function DocumentDiagram({
   kinds,
   onKindChange,
   onOpenReport,
+  onOpenTrack,
   actions,
   exportName = "diagram",
   height = 560,
@@ -182,6 +184,7 @@ export default function DocumentDiagram({
         onSelect={setSelected}
         onOpenNode={node => {
           if (node.reportId && onOpenReport) onOpenReport(node.reportId);
+          else if (node.trackId && onOpenTrack) onOpenTrack(node.trackId);
           else if (node.url) window.open(node.url, "_blank", "noopener,noreferrer");
         }}
         height={height}
@@ -224,6 +227,14 @@ export default function DocumentDiagram({
                 onClick={() => onOpenReport(selected.reportId!)}
               >
                 <FileText size={12} /> Тайланг нээх
+              </button>
+            )}
+            {selected.trackId && onOpenTrack && (
+              <button
+                className="text-button"
+                onClick={() => onOpenTrack(selected.trackId!)}
+              >
+                <FileText size={12} /> Track нээх
               </button>
             )}
             {selected.url && (

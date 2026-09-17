@@ -1,11 +1,43 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { publicProcedure, router } from "./_core/trpc";
 import { aiConfig, analyze } from "./aiAnalyzer";
 import { getInsights, relatedReports } from "./insights";
+import { groqConfig } from "./groq";
+import { openRouterConfig } from "./openrouter";
+import { runChat, type ChatTurn, type KnowledgeSnippet } from "./knowledgeChat";
 
 const workspaceSchema = z.object({
   workspaceKey: z.string().min(12).max(160),
 });
+
+const chatTurnSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().max(4000),
+});
+
+const knowledgeSnippetSchema = z.object({
+  kind: z.enum(["report", "playbook", "room"]),
+  id: z.string().max(64),
+  title: z.string().max(200),
+  extract: z.string().max(600),
+  meta: z.string().max(120).optional(),
+});
+
+// Per-IP sliding-window budget for the chat endpoint: it makes real Groq /
+// Gemini API calls (cost + latency), so it gets a tighter cap than the
+// generic 600/15min Express-level `apiLimiter` in server/_core/index.ts.
+const CHAT_WINDOW_MS = 60_000;
+const CHAT_LIMIT_PER_WINDOW = 12;
+const chatHits = new Map<string, number[]>();
+
+function isChatRateLimited(ip: string): boolean {
+  const now = Date.now();
+  const recent = (chatHits.get(ip) ?? []).filter(t => now - t < CHAT_WINDOW_MS);
+  recent.push(now);
+  chatHits.set(ip, recent);
+  return recent.length > CHAT_LIMIT_PER_WINDOW;
+}
 
 /**
  * Optional AI surface for the Round 4 visual modules.
@@ -69,5 +101,45 @@ export const aiRouter = router({
       const result = await getInsights(input.workspaceKey, { force: true });
       return result.snapshot;
     }),
+  }),
+
+  // Round 6 — Operator Assistant chatbot: Groq (fast reply) + Gemini
+  // (background enrichment) collaborating over the local knowledge base.
+  chat: router({
+    status: publicProcedure.query(() => {
+      const groq = groqConfig();
+      const gemini = aiConfig();
+      const openRouter = openRouterConfig();
+      return {
+        groqConfigured: groq.configured,
+        groqKeyCount: groq.keys.length,
+        groqModel: groq.model,
+        geminiConfigured: gemini.configured,
+        geminiModel: gemini.model,
+        openRouterConfigured: openRouter.configured,
+        openRouterModel: openRouter.model,
+      };
+    }),
+
+    ask: publicProcedure
+      .input(
+        z.object({
+          message: z.string().min(1).max(2000),
+          history: z.array(chatTurnSchema).max(12).optional(),
+          snippets: z.array(knowledgeSnippetSchema).max(10).optional(),
+        })
+      )
+      .mutation(async ({ input, ctx }) => {
+        const ip = ctx.req.ip ?? "unknown";
+        if (isChatRateLimited(ip)) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: "Хэт олон зурвас илгээлээ — түр хүлээгээд дахин оролдоно уу.",
+          });
+        }
+        const history: ChatTurn[] = input.history ?? [];
+        const snippets: KnowledgeSnippet[] = input.snippets ?? [];
+        return runChat({ message: input.message, history, snippets });
+      }),
   }),
 });

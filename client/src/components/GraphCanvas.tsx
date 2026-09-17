@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link2, Maximize2, Minimize2, Plus, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowUpRight, Link2, Maximize2, Minimize2, Plus, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { useTheme } from "@/contexts/ThemeContext";
 import type {
   NodeKind,
@@ -634,6 +634,11 @@ export default function GraphCanvas({
           ) : selectedNode ? (
             <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
               <span className="graph-hint-strong">{selectedNode.label}</span>
+              {(selectedNode.reportId || selectedNode.trackId) && onOpenNode && (
+                <button className="graph-tool" onClick={() => onOpenNode(selectedNode)}>
+                  <ArrowUpRight size={12} /> Нээх
+                </button>
+              )}
               <button
                 className="graph-tool"
                 onClick={() => {
@@ -662,7 +667,7 @@ export default function GraphCanvas({
               {connectFrom ? "Хоёр дахь зангилааг сонгоно уу" : "Эхний зангилааг сонгоно уу"} — Esc дарж болих
             </span>
           ) : (
-            <span className="graph-hint">Зангилаа чирж байрлуулна. Давхар дарж нээнэ. Delete дарж устгана.</span>
+            <span className="graph-hint">Зангилаа сонгоод “Нээх” дарна. Давхар дарж мөн нээж болно.</span>
           )}
         </div>
       )}

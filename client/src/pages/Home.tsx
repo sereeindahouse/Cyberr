@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Award,
+  Bot,
   BookOpen,
   CalendarDays,
   ChartBar,
@@ -68,6 +69,7 @@ import { thmFreePathRooms, thmRoomUrl } from "@/data/thmFreePath";
 import { filterReports, toggleReportStatus } from "@/lib/report-utils";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import AIChatBot from "@/components/AIChatBot";
 import DocumentDiagram from "@/components/DocumentDiagram";
 import KnowledgeAtlas from "@/components/KnowledgeAtlas";
 import InsightsDashboard from "@/components/InsightsDashboard";
@@ -98,6 +100,7 @@ export type Report = {
   image?: string;
   archived?: boolean;
   sourcePath?: string;
+  category?: string;
 };
 
 export type TaskItem = {
@@ -322,9 +325,9 @@ const reportTemplates = [
     label: "Кибер талбарын тэмдэглэл",
     source: "Cyber" as const,
     stage: "Foundations",
-    tags: ["field-notes"],
+    tags: ["pentest-report", "reconnaissance", "evidence"],
     content:
-      "## Даалгаврын тойм\n\nАрхитектур болон халдлагын гадаргуу, итгэмжлэгдсэн хил хязгаарыг тодорхойлох.\n\n## Үндсэн шалтгаан\n\n",
+      "# Penetration Test Report\n\n## 1. Executive Summary\n\n\n## 2. Scope and Authorization\n\n- Target / room:\n- Authorized scope:\n- Date and operator:\n\n## 3. Attack Surface and Reconnaissance\n\n### Assets and services\n\n### Commands and evidence\n\n```bash\n# Add only commands run in the authorized lab\n\n```\n\n## 4. Findings\n\n### Finding 01: [Title]\n\n- Severity: Informational / Low / Medium / High / Critical\n- Asset:\n- Evidence:\n- Impact:\n- Reproduction steps:\n\n## 5. Exploitation Path\n\n1. Initial access:\n2. Discovery:\n3. Privilege escalation or lateral movement:\n4. Proof / flag:\n\n## 6. Remediation\n\n## 7. Lessons Learned\n\n## 8. Appendix\n\n- Related playbooks:\n- Related reports:\n- Screenshots / hashes:\n",
   },
   {
     key: "thm",
@@ -333,7 +336,7 @@ const reportTemplates = [
     stage: "Foundations",
     tags: ["tryhackme", "room-debrief"],
     content:
-      "## Room-ийн зорилго\n\nЭмзэг байдлыг илрүүлэх болон нэвтрэх дараалал.\n\n## Ашигласан техникүүд\n\n",
+      "# TryHackMe Room Write-up\n\n## 1. Room Overview\n\n- Room:\n- Difficulty:\n- Objective:\n- Link:\n\n## 2. Enumeration\n\n### Services and attack surface\n\n### Commands\n\n```bash\n\n```\n\n## 3. Initial Access\n\n- Vulnerability / weakness:\n- Evidence:\n- Credentials or foothold:\n\n## 4. Privilege Escalation\n\n- Enumeration:\n- Path selected:\n- Proof:\n\n## 5. Flags and Evidence\n\n## 6. Root Cause and Remediation\n\n## 7. Lessons Learned\n\n## 8. Related Playbooks and Tags\n\n",
   },
   {
     key: "picoctf",
@@ -399,7 +402,21 @@ function readReports(): Report[] {
       source: note.source as Report["source"],
       status: note.status as ReportStatus,
     }));
-    return [...reports, ...imported.filter(note => !reports.some((report: Report) => report.id === note.id))];
+    const importedById = new Map<number, (typeof imported)[number]>(
+      imported.map(note => [note.id, note])
+    );
+    const migrated = reports.map((report: Report) => {
+      const current = importedById.get(report.id);
+      if (!current) return report;
+      return {
+        ...report,
+        title: current.title,
+        tags: current.tags,
+        sourcePath: current.sourcePath,
+        category: current.category,
+      };
+    });
+    return [...migrated, ...imported.filter(note => !reports.some((report: Report) => report.id === note.id))];
   } catch {
     return [...initialReports, ...importedKnowledgeNotes.map(note => ({
       ...note,
@@ -665,6 +682,7 @@ export default function Home() {
   const displayName = authUser?.name || "Operator";
   const [statusFilter, setStatusFilter] = useState<"All" | ReportStatus | "Archived">("All");
   const [tagFilter, setTagFilter] = useState("All");
+  const [trackFilter, setTrackFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "readTime">("newest");
   const [mobileNav, setMobileNav] = useState(false);
@@ -684,6 +702,9 @@ export default function Home() {
   const [newRoom, setNewRoom] = useState("");
   const [newStage, setNewStage] = useState("Foundations");
   const [newSource, setNewSource] = useState<Report["source"]>("Cyber");
+  const [newTrackId, setNewTrackId] = useState("thm-free-path");
+  const [newTrackSectionId, setNewTrackSectionId] = useState("level-1");
+  const [newCoreTags, setNewCoreTags] = useState("");
   const [templateKey, setTemplateKey] = useState("custom");
   const [newContent, setNewContent] = useState("");
   const [attachment, setAttachment] = useState<string | undefined>();
@@ -712,6 +733,7 @@ export default function Home() {
   const [aiResult, setAiResult] = useState<AnalysisResult | null>(null);
 
   const [publicView, setPublicView] = useState(initialPublicView);
+  const [chatOpen, setChatOpen] = useState(false);
 
   function setPublicViewMode(next: boolean) {
     setPublicView(next);
@@ -810,13 +832,22 @@ export default function Home() {
   useEffect(() => {
     if (!mongoReports.data || mongoHydrated.current) return;
     if (mongoReports.data.length) {
-      const remoteReports = mongoReports.data as unknown as (Report & { updatedAt?: string })[];
+      const remoteRows = mongoReports.data as unknown as (Report & { updatedAt?: string })[];
       const imported = importedKnowledgeNotes.map(note => ({
         ...note,
         tags: [...note.tags],
         source: note.source as Report["source"],
         status: note.status as ReportStatus,
       }));
+      const importedById = new Map<number, (typeof imported)[number]>(
+        imported.map(note => [note.id, note])
+      );
+      const remoteReports = remoteRows.map(report => {
+        const current = importedById.get(report.id);
+        return current
+          ? { ...report, title: current.title, tags: current.tags, category: current.category, sourcePath: current.sourcePath }
+          : report;
+      });
       const localOnly = publicView
         ? []
         : reports.filter(
@@ -965,9 +996,20 @@ export default function Home() {
     [reports, publicView]
   );
 
-  const availableTags = useMemo(
-    () => Array.from(new Set(visibleReports.flatMap(report => report.tags))).sort(),
-    [visibleReports]
+  const reportTrackOptions = useMemo(
+    () => [
+      { id: "thm-free-path", label: "THM Free Path", match: (report: Report) => report.source === "THM" },
+      { id: "pico-ctf-cylab", label: "picoCTF / CyLab", match: (report: Report) => report.source === "picoCTF" },
+      { id: "thm-paid-ad", label: "THM Paid / AD", match: (report: Report) => report.stage === "Deep Offensive" || report.tags.some(tag => /ad|active-directory|kerberos/.test(tag)) },
+      { id: "htb-flaws", label: "HTB / flAWS", match: (report: Report) => report.source === "HTB" },
+      { id: "oscp-cloud", label: "OSCP / Cloud", match: (report: Report) => report.source === "Cloud" || report.category === "cloud-and-credentials" },
+    ],
+    []
+  );
+  const selectedTrackOption = reportTrackOptions.find(option => option.id === trackFilter);
+  const visibleSubTags = useMemo(
+    () => Array.from(new Set((selectedTrackOption ? visibleReports.filter(selectedTrackOption.match) : visibleReports).flatMap(report => report.tags))).sort(),
+    [selectedTrackOption, visibleReports]
   );
 
   const filteredReports = useMemo<Report[]>(() => {
@@ -982,6 +1024,9 @@ export default function Home() {
     }
     if (tagFilter !== "All") {
       list = list.filter(r => r.tags.includes(tagFilter));
+    }
+    if (selectedTrackOption) {
+      list = list.filter(selectedTrackOption.match);
     }
     if (query.trim()) {
       const q = query.trim().toLowerCase();
@@ -1001,7 +1046,7 @@ export default function Home() {
       if (sortMode === "readTime") return parseInt(a.readTime) - parseInt(b.readTime);
       return 0;
     });
-  }, [visibleReports, statusFilter, tagFilter, query, sortMode]);
+  }, [visibleReports, statusFilter, tagFilter, trackFilter, selectedTrackOption, query, sortMode]);
 
   const selectedReport =
     visibleReports.find(report => report.id === selectedId) || visibleReports[0];
@@ -1129,6 +1174,9 @@ export default function Home() {
     setNewRoom("");
     setNewStage("Foundations");
     setNewSource("Cyber");
+    setNewTrackId("thm-free-path");
+    setNewTrackSectionId("level-1");
+    setNewCoreTags("");
     setTemplateKey("custom");
     setNewContent(reportTemplates[0].content);
     setAttachment(undefined);
@@ -1141,6 +1189,9 @@ export default function Home() {
     setNewRoom(`THM / ${room.title}`);
     setNewStage("Foundations");
     setNewSource("THM");
+    setNewTrackId("thm-free-path");
+    setNewTrackSectionId(room.levelId);
+    setNewCoreTags("room-notes");
     setTemplateKey("thm");
     setNewContent(
       `## Room-ийн зорилго\n\n${room.title}\n\n## THM холбоос\n\n${thmRoomUrl(room.slug)}\n\n## Олсон зүйлс\n\n\n## Ашигласан техникүүд\n\n\n## Дүгнэлт\n\n`
@@ -1162,6 +1213,10 @@ export default function Home() {
     setNewRoom(report.room);
     setNewStage(report.stage);
     setNewSource(report.source);
+    const matchingTrack = reportTrackOptions.find(option => option.match(report));
+    setNewTrackId(matchingTrack?.id ?? "thm-free-path");
+    setNewTrackSectionId("level-1");
+    setNewCoreTags(report.tags.filter(tag => !tag.startsWith("roadmap-") && !tag.startsWith("section-")).join(", "));
     setTemplateKey("custom");
     setNewContent(report.content);
     setAttachment(report.image);
@@ -1176,6 +1231,20 @@ export default function Home() {
     setNewSource(template.source);
     setNewStage(template.stage);
     setNewContent(template.content);
+  }
+
+  function selectedEditorTrack() {
+    return roadmapTracks.find(track => track.id === newTrackId) ?? roadmapTracks[0];
+  }
+
+  function applyTrackDefaults(trackId: string) {
+    setNewTrackId(trackId);
+    const track = roadmapTracks.find(item => item.id === trackId) ?? roadmapTracks[0];
+    setNewTrackSectionId(track.sections[0]?.id ?? "");
+    if (trackId === "thm-free-path" || trackId === "thm-paid-ad") setNewSource("THM");
+    else if (trackId === "pico-ctf-cylab") setNewSource("picoCTF");
+    else if (trackId === "htb-flaws") setNewSource("HTB");
+    else if (trackId === "oscp-cloud") setNewSource("Cloud");
   }
 
   function handleAttachment(event: ChangeEvent<HTMLInputElement>) {
@@ -1229,6 +1298,7 @@ export default function Home() {
                 excerpt: calculatedExcerpt,
                 readTime: calculatedReadTime,
                 image: attachment,
+                category: newTrackId,
               }
             : item
         )
@@ -1244,7 +1314,9 @@ export default function Home() {
         stage: newStage,
         tags: Array.from(
           new Set([
-            newStage.toLowerCase().replace(" ", "-"),
+            `roadmap-${newTrackId}`,
+            `section-${newTrackSectionId}`,
+            ...newCoreTags.split(",").map(tag => tag.trim().toLowerCase().replace(/\s+/g, "-")).filter(Boolean),
             ...(reportTemplates.find(item => item.key === templateKey)?.tags || [
               "field-notes",
             ]),
@@ -1256,6 +1328,7 @@ export default function Home() {
         excerpt: calculatedExcerpt,
         content: newContent,
         image: attachment,
+        category: newTrackId,
       };
       setReports(current => [report, ...current]);
       touchReportMeta(workspaceKey, report.id);
@@ -1464,13 +1537,17 @@ export default function Home() {
         room: parsed.room || "Obsidian import",
         source: parsed.source || "THM",
         stage: parsed.stage || "Foundations",
-        tags: parsed.tags || ["obsidian-import"],
+        tags: Array.from(new Set([
+          `roadmap-${parsed.source === "THM" ? "thm-free-path" : parsed.source === "picoCTF" ? "pico-ctf-cylab" : parsed.source === "Cloud" ? "oscp-cloud" : parsed.source === "HTB" ? "htb-flaws" : "general-reference"}`,
+          ...(parsed.tags || ["obsidian-import"]),
+        ])),
         status: "Draft",
         readTime: parsed.readTime || "05 min",
         date: parsed.date || formatReportDate(new Date()),
         excerpt: parsed.excerpt || "Obsidian-аас импорт хийсэн тэмдэглэл.",
         content: parsed.content || "",
         image: undefined,
+        category: parsed.source === "THM" ? "thm-free-path" : parsed.source === "picoCTF" ? "pico-ctf-cylab" : parsed.source === "Cloud" ? "oscp-cloud" : parsed.source === "HTB" ? "htb-flaws" : "general-reference",
       };
       setReports(current => [imported, ...current]);
       touchReportMeta(workspaceKey, imported.id);
@@ -1798,6 +1875,13 @@ export default function Home() {
               title={theme === "dark" ? "Цагаан горимд шилжих" : "Бараан горимд шилжих"}
             >
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setChatOpen(true)}
+              title="Operator Assistant chatbot (Groq + Gemini)"
+            >
+              <Bot size={16} />
             </button>
             <button
               className="icon-button"
@@ -2306,15 +2390,40 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="tag-filter-row">
-                  <span className="tag-filter-label">Шошго:</span>
+                <div className="tag-filter-row report-track-filters">
+                  <span className="tag-filter-label">Roadmap:</span>
+                  <button
+                    className={trackFilter === "All" ? "tag-chip selected" : "tag-chip"}
+                    onClick={() => {
+                      setTrackFilter("All");
+                      setTagFilter("All");
+                    }}
+                  >
+                    Бүх чиглэл
+                  </button>
+                  {reportTrackOptions.map(option => (
+                    <button
+                      key={option.id}
+                      className={trackFilter === option.id ? "tag-chip selected" : "tag-chip"}
+                      onClick={() => {
+                        setTrackFilter(option.id);
+                        setTagFilter("All");
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="tag-filter-row report-subtag-filters">
+                  <span className="tag-filter-label">Core tag:</span>
                   <button
                     className={tagFilter === "All" ? "tag-chip selected" : "tag-chip"}
                     onClick={() => setTagFilter("All")}
                   >
                     Бүгд
                   </button>
-                  {availableTags.map(tag => (
+                  {visibleSubTags.slice(0, 16).map(tag => (
                     <button
                       key={tag}
                       className={tagFilter === tag ? "tag-chip selected" : "tag-chip"}
@@ -2324,10 +2433,7 @@ export default function Home() {
                     </button>
                   ))}
                   {tagFilter !== "All" && (
-                    <button
-                      className="clear-filter"
-                      onClick={() => setTagFilter("All")}
-                    >
+                    <button className="clear-filter" onClick={() => setTagFilter("All")}>
                       <X size={12} /> Цэвэрлэх
                     </button>
                   )}
@@ -2927,6 +3033,46 @@ export default function Home() {
                   </details>
                 );
               })}
+
+              {(() => {
+                const trackReports = visibleReports.filter(report => {
+                  const option = reportTrackOptions.find(item => item.id === activeTrack.id);
+                  return option ? option.match(report) || report.category === activeTrack.id : report.category === activeTrack.id;
+                });
+                return (
+                  <details className="thm-level report-track-section" open>
+                    <summary>
+                      <span>
+                        <strong>Таны {activeTrack.name} report-ууд</strong>
+                        <small>{trackReports.length} report хадгалагдсан</small>
+                      </span>
+                      <span className="thm-level-percent">{trackReports.length}</span>
+                    </summary>
+                    <div className="track-report-list">
+                      {trackReports.length === 0 ? (
+                        <p className="tiny">Энэ track-д report алга. “Тайлан → Шинэ тайлан” ашиглан нэмнэ үү.</p>
+                      ) : (
+                        trackReports.map(report => (
+                          <div className="track-report-row" key={report.id}>
+                            <div>
+                              <strong>{report.title}</strong>
+                              <small>{report.room} · {report.tags.slice(0, 4).map(tag => `#${tag}`).join(" ")}</small>
+                            </div>
+                            <div className="track-report-actions">
+                              <button className="text-button" onClick={() => openReportInReader(report.id)}>
+                                <FileText size={13} /> Унших
+                              </button>
+                              <button className="text-button" onClick={() => openDiagramForReport(report.id)}>
+                                <Waypoints size={13} /> Диаграм
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </details>
+                );
+              })()}
             </div>
           </section>
         )}
@@ -2944,6 +3090,22 @@ export default function Home() {
                   концепт зураг дээр. Хулганы дугуйгаар томруулж, чирж шилжүүлээд
                   зангилааг сонгон фокус хийнэ үү.
                 </p>
+              </div>
+            </div>
+            <div className="ai-brain-card">
+              <div>
+                <div className="section-kicker">AI brain status</div>
+                <h2>Мэдлэгийг холбож буй оюун</h2>
+                <p>
+                  {aiSummary?.analyzed ?? 0} / {aiSummary?.total ?? visibleReports.length} report шинжлэгдсэн
+                </p>
+              </div>
+              <div className="ai-brain-providers">
+                <span>Gemini: {atlasQuery.data?.configured ? "идэвхтэй" : "local fallback"}</span>
+                <span>Insights: {insightsQuery.data?.relations.length ?? 0} холбоос</span>
+                <button className="secondary-button" onClick={refreshInsights} disabled={refreshInsightsMutation.isPending}>
+                  <RotateCcw size={13} /> Шинэчлэх
+                </button>
               </div>
             </div>
             <KnowledgeAtlas
@@ -2971,6 +3133,19 @@ export default function Home() {
                   Тайланг mind-map / flowchart / network хэлбэрээр, roadmap
                   track-ыг мод хэлбэрээр дүрсэлнэ. SVG-ээр татаж авах боломжтой.
                 </p>
+              </div>
+            </div>
+
+            <div className="ai-brain-card">
+              <div>
+                <div className="section-kicker">AI brain status</div>
+                <h2>{diagramReport?.title ?? diagramTrack?.name ?? "Сонгосон эх сурвалж"}</h2>
+                <p>{diagramAiInsight ? "Энэ эх сурвалжийн summary, concepts, steps бэлэн." : "Эх сурвалжаа сонгоод AI шинжилгээ ажиллуулна уу."}</p>
+              </div>
+              <div className="ai-brain-providers">
+                <span>Provider: {diagramAiInsight?.provider ?? (atlasQuery.data?.configured ? "Gemini" : "Local")}</span>
+                <span>Гол ойлголт: {diagramAiInsight?.concepts.length ?? 0}</span>
+                {diagramReport && <button className="secondary-button" onClick={runAiAnalysis} disabled={aiAnalyze.isPending}><Sparkles size={13} /> AI шинжлэх</button>}
               </div>
             </div>
 
@@ -3127,6 +3302,19 @@ export default function Home() {
         )}
       </main>
 
+      <AIChatBot
+        reports={visibleReports}
+        playbooks={playbooks}
+        rooms={thmFreePathRooms}
+        open={chatOpen}
+        onClose={() => setChatOpen(false)}
+        onOpenReport={reportId => {
+          openReportInReader(reportId);
+          setChatOpen(false);
+        }}
+        onOpenRoom={slug => window.open(thmRoomUrl(slug), "_blank", "noreferrer")}
+      />
+
       {editorOpen && (
         <div
           className="editor-overlay"
@@ -3204,6 +3392,43 @@ export default function Home() {
                   <option>Cyber</option>
                 </select>
               </label>
+            </div>
+            <div className="two-fields">
+              <label>
+                Roadmap чиглэл
+                <select
+                  value={newTrackId}
+                  onChange={event => {
+                    applyTrackDefaults(event.target.value);
+                  }}
+                >
+                  {roadmapTracks.map(track => (
+                    <option key={track.id} value={track.id}>{track.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Section / category
+                <select
+                  value={newTrackSectionId}
+                  onChange={event => setNewTrackSectionId(event.target.value)}
+                >
+                  {selectedEditorTrack().sections.map(section => (
+                    <option key={section.id} value={section.id}>{section.label}: {section.title}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label>
+              Core tag-ууд
+              <input
+                value={newCoreTags}
+                onChange={event => setNewCoreTags(event.target.value)}
+                placeholder="жишээ: suid, cron, enumeration"
+              />
+            </label>
+            <div className="template-note">
+              <Sparkles size={13} /> Roadmap чиглэл, section, core tag нь report filter, Atlas, chatbot-д автоматаар ашиглагдана.
             </div>
             <label>
               Үе шат
