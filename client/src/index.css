@@ -708,6 +708,71 @@ body.graph-modal-open { overflow: hidden; }
 .ai-steps { margin: 0; padding-left: 18px; color: var(--body-copy); font-size: 11px; line-height: 1.7; }
 .thm-header-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
+/* --- Round 5: editable graphs, insights dashboard, reader UX --- */
+.graph-tool.active { background: var(--selected); color: var(--green); border: 1px solid var(--active-border); }
+.graph-tool.danger { color: var(--red); }
+.graph-tool.danger:hover { background: var(--red-soft); }
+.graph-edge-hit { cursor: pointer; }
+.graph-editbar { position: absolute; left: 10px; bottom: 10px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--surface); border: 1px solid var(--line-dark); border-radius: 6px; box-shadow: 0 6px 18px var(--shadow); font-size: 11px; color: var(--muted); max-width: calc(100% - 180px); }
+.graph-hint { font-size: 10px; color: var(--muted); }
+.graph-hint-strong { font-weight: 700; color: var(--ink); font-size: 11px; }
+.graph-rename { display: flex; align-items: center; gap: 6px; }
+.graph-rename input { padding: 5px 8px; font-size: 11px; border: 1px solid var(--line); border-radius: 4px; background: var(--input); color: var(--ink); min-width: 180px; }
+.atlas-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.diagram-edited-note { margin: 0; color: var(--muted); font-size: 10px; font-style: italic; }
+.secondary-button.active { background: var(--selected); border: 1px solid var(--active-border); color: var(--green); }
+.spin { animation: spin 0.8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.reader-actions-top { position: sticky; top: 0; z-index: 5; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 0; background: var(--white); border-bottom: 1px solid var(--line); margin: 0 auto; max-width: 760px; }
+.read-full-button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--btn-soft); color: var(--green); border-radius: 5px; font-size: 11px; font-weight: 700; margin: 14px 0 6px; }
+.read-full-button:hover { background: var(--btn-soft-hover); }
+.related-strip { margin-top: 22px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.related-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.related-chip { display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px; background: var(--input); border: 1px solid var(--line); border-radius: 999px; color: var(--ink); font-size: 10px; }
+.related-chip:hover { border-color: var(--green); }
+.related-chip small { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.ai-concept-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.ai-concept { padding: 4px 8px; background: var(--chip); border-radius: 999px; color: var(--green); font: 9px 'DM Mono', monospace; }
+
+.insights-module { display: grid; gap: 18px; }
+.insights-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+.insights-stat { display: grid; gap: 4px; padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.insights-stat strong { font-size: 18px; }
+.insights-stat small { color: var(--muted); font: 9px 'DM Mono', monospace; text-transform: uppercase; letter-spacing: .06em; }
+.insights-stat-icon { color: var(--green); }
+.insights-card { padding: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+.insights-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.insights-sub { color: var(--muted); font: 9px 'DM Mono', monospace; }
+.heatmap-scroll { overflow-x: auto; padding-bottom: 6px; }
+.heatmap-legend { display: flex; gap: 8px; align-items: center; justify-content: flex-end; margin-top: 8px; color: var(--muted); font: 9px 'DM Mono', monospace; }
+.chart-scroll { overflow-x: auto; }
+.hbar { display: grid; gap: 8px; margin-top: 12px; }
+.hbar-row { display: grid; grid-template-columns: 120px 1fr 30px; gap: 8px; align-items: center; font-size: 11px; }
+.hbar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); font-weight: 600; }
+.hbar-track { height: 8px; background: var(--progress-track); border-radius: 4px; overflow: hidden; }
+.hbar-track i { display: block; height: 100%; background: var(--green); border-radius: inherit; }
+.hbar-value { text-align: right; color: var(--muted); font: 10px 'DM Mono', monospace; }
+.donut-wrap { display: flex; gap: 18px; align-items: center; }
+.donut-legend { display: grid; gap: 6px; font-size: 11px; }
+.donut-legend-row { display: flex; justify-content: space-between; gap: 12px; }
+.dup-list { display: grid; gap: 10px; margin-top: 12px; }
+.dup-row { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; background: var(--input); border: 1px solid var(--line); border-radius: 6px; font-size: 11px; }
+.recent-list { display: grid; gap: 6px; margin-top: 12px; }
+.recent-row { display: grid; gap: 2px; padding: 8px 10px; text-align: left; background: var(--input); border: 1px solid var(--line); border-radius: 5px; }
+.recent-row:hover { border-color: var(--green); }
+.recent-title { font-size: 11px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-strip { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 14px; background: var(--green-wash); border: 1px solid var(--active-border); border-radius: 8px; }
+
 @media (max-width: 980px) {
   .atlas-body { grid-template-columns: minmax(0, 1fr); }
+  .insights-grid { grid-template-columns: repeat(3, 1fr); }
+  .insights-row { grid-template-columns: 1fr; }
+  .hbar-row { grid-template-columns: 90px 1fr 28px; }
 }
+@media (max-width: 560px) {
+  .insights-grid { grid-template-columns: repeat(2, 1fr); }
+  .graph-editbar { max-width: calc(100% - 20px); left: 10px; right: 10px; bottom: 56px; }
+  .reader-actions-top { position: static; }
+}
+

@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { publicProcedure, router } from "./_core/trpc";
 import { aiConfig, analyze } from "./aiAnalyzer";
+import { getInsights, relatedReports } from "./insights";
+
+const workspaceSchema = z.object({
+  workspaceKey: z.string().min(12).max(160),
+});
 
 /**
  * Optional AI surface for the Round 4 visual modules.
@@ -29,4 +34,40 @@ export const aiRouter = router({
     .mutation(async ({ input }) =>
       analyze(input.content, { maxConcepts: input.maxConcepts ?? 8 })
     ),
+
+  insights: router({
+    status: publicProcedure.input(workspaceSchema).query(async ({ input }) => {
+      const result = await getInsights(input.workspaceKey);
+      return result.snapshot;
+    }),
+
+    atlas: publicProcedure.input(workspaceSchema).query(async ({ input }) => {
+      const result = await getInsights(input.workspaceKey);
+      return result;
+    }),
+
+    report: publicProcedure
+      .input(workspaceSchema.extend({ id: z.number() }))
+      .query(async ({ input }) => {
+        const result = await getInsights(input.workspaceKey);
+        return result.insights.find(i => i.id === input.id) ?? null;
+      }),
+
+    related: publicProcedure
+      .input(
+        workspaceSchema.extend({
+          id: z.number(),
+          limit: z.number().int().min(1).max(24).optional(),
+        })
+      )
+      .query(async ({ input }) => {
+        const result = await getInsights(input.workspaceKey);
+        return relatedReports(result, input.id, input.limit ?? 6);
+      }),
+
+    refresh: publicProcedure.input(workspaceSchema).mutation(async ({ input }) => {
+      const result = await getInsights(input.workspaceKey, { force: true });
+      return result.snapshot;
+    }),
+  }),
 });

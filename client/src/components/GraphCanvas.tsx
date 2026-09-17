@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Maximize2, Minimize2, ZoomIn, ZoomOut } from "lucide-react";
+import { Link2, Maximize2, Minimize2, Plus, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
 import { useTheme } from "@/contexts/ThemeContext";
 import type {
   NodeKind,
@@ -86,6 +86,14 @@ export type GraphCanvasProps = {
   emptyLabel?: string;
   /** File name (without extension) for the SVG export. */
   exportName?: string;
+  editable?: boolean;
+  onMoveNode?: (id: string, x: number, y: number) => void;
+  onRenameNode?: (id: string, label: string) => void;
+  onAddNode?: () => void;
+  onDeleteNode?: (id: string) => void;
+  onAddEdge?: (source: string, target: string) => void;
+  onDeleteEdge?: (edgeId: string) => void;
+  onResetLayout?: () => void;
 };
 
 export default function GraphCanvas({
@@ -97,6 +105,14 @@ export default function GraphCanvas({
   expandedHeight,
   emptyLabel = "Диаграм зурахад хангалттай өгөгдөл алга.",
   exportName = "diagram",
+  editable = false,
+  onMoveNode,
+  onRenameNode,
+  onAddNode,
+  onDeleteNode,
+  onAddEdge,
+  onDeleteEdge,
+  onResetLayout,
 }: GraphCanvasProps) {
   const { theme } = useTheme();
   const palette = useMemo(() => graphPalette(theme), [theme]);
@@ -105,6 +121,21 @@ export default function GraphCanvas({
   const [view, setView] = useState<View>({ x: 0, y: 0, w: 1000, h: 600 });
   const [expanded, setExpanded] = useState(false);
   const dragRef = useRef<{ x: number; y: number; view: View } | null>(null);
+
+  // editable states
+  const [connectFrom, setConnectFrom] = useState<string | null>(null);
+  const [connectMode, setConnectMode] = useState(false);
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [renameId, setRenameId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const nodeDragRef = useRef<{
+    id: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+    scale: number;
+  } | null>(null);
 
   const bounds = useMemo(
     () => ({
@@ -125,6 +156,14 @@ export default function GraphCanvas({
     fit();
   }, [fit]);
 
+  // Clear selections when graph changes
+  useEffect(() => {
+    setSelectedEdgeId(null);
+    setConnectFrom(null);
+    setConnectMode(false);
+    setRenameId(null);
+  }, [graph]);
+
   // Scroll guard: while the canvas is expanded the page behind it must not
   // scroll (wheel-zoom and drag both happen inside the overlay).
   useEffect(() => {
@@ -135,11 +174,37 @@ export default function GraphCanvas({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && expanded) setExpanded(false);
+      if (event.key === "Escape" && expanded) {
+        setExpanded(false);
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+        if (event.key === "Escape" && renameId) {
+          setRenameId(null);
+        }
+        return;
+      }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        if (selectedEdgeId && onDeleteEdge) {
+          onDeleteEdge(selectedEdgeId);
+          setSelectedEdgeId(null);
+        } else if (selectedId && onDeleteNode) {
+          onDeleteNode(selectedId);
+        }
+      }
+      if (event.key === "Escape") {
+        if (renameId) setRenameId(null);
+        if (connectMode) {
+          setConnectMode(false);
+          setConnectFrom(null);
+        }
+        if (selectedEdgeId) setSelectedEdgeId(null);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [expanded]);
+  }, [expanded, selectedEdgeId, selectedId, onDeleteEdge, onDeleteNode, renameId, connectMode]);
 
   /** Pixel → viewBox mapping that respects `preserveAspectRatio="xMidYMid meet"`. */
   const metrics = useCallback(() => {
@@ -197,13 +262,43 @@ export default function GraphCanvas({
     return () => el.removeEventListener("wheel", onWheel);
   }, [zoomAt]);
 
+  const startNodeDrag = useCallback(
+    (node: PositionedNode, event: React.PointerEvent) => {
+      if (!editable) return;
+      if (connectMode) return;
+      if (renameId) return;
+      event.stopPropagation();
+      const m = metrics();
+      nodeDragRef.current = {
+        id: node.id,
+        startX: event.clientX,
+        startY: event.clientY,
+        origX: node.x,
+        origY: node.y,
+        scale: m?.scale ?? 1,
+      };
+      (event.currentTarget as Element).setPointerCapture?.(event.pointerId);
+    },
+    [editable, connectMode, renameId, metrics]
+  );
+
   const onPointerDown = (event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0) return;
+    if (nodeDragRef.current) return;
     dragRef.current = { x: event.clientX, y: event.clientY, view };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const onPointerMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    const nodeDrag = nodeDragRef.current;
+    if (nodeDrag) {
+      const m = metrics();
+      const scale = m?.scale ?? nodeDrag.scale ?? 1;
+      const dx = (event.clientX - nodeDrag.startX) / scale;
+      const dy = (event.clientY - nodeDrag.startY) / scale;
+      onMoveNode?.(nodeDrag.id, nodeDrag.origX + dx, nodeDrag.origY + dy);
+      return;
+    }
     const drag = dragRef.current;
     const m = metrics();
     if (!drag || !m || !m.scale) return;
@@ -216,7 +311,27 @@ export default function GraphCanvas({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    if (nodeDragRef.current) {
+      nodeDragRef.current = null;
+    }
     dragRef.current = null;
+  };
+
+  const handleNodeClick = (node: PositionedNode) => {
+    if (connectMode) {
+      if (!connectFrom) {
+        setConnectFrom(node.id);
+      } else {
+        if (connectFrom !== node.id) {
+          onAddEdge?.(connectFrom, node.id);
+        }
+        setConnectFrom(null);
+        setConnectMode(false);
+      }
+      return;
+    }
+    onSelect?.(node);
+    setSelectedEdgeId(null);
   };
 
   const exportSvg = () => {
@@ -234,6 +349,8 @@ export default function GraphCanvas({
     clone.querySelectorAll("[data-selection='true']").forEach(node => {
       node.removeAttribute("data-selection");
     });
+    // Remove hit paths
+    clone.querySelectorAll(".graph-edge-hit").forEach(n => n.remove());
     const background = document.createElementNS("http://www.w3.org/2000/svg", "rect");
     background.setAttribute("x", "0");
     background.setAttribute("y", "0");
@@ -250,6 +367,8 @@ export default function GraphCanvas({
     link.click();
     URL.revokeObjectURL(url);
   };
+
+  const selectedNode = selectedId ? graph.nodes.find(n => n.id === selectedId) ?? null : null;
 
   const canvas = (
     <div
@@ -285,6 +404,17 @@ export default function GraphCanvas({
             >
               <path d="M 0 0 L 10 5 L 0 10 z" fill={palette.edge} />
             </marker>
+            <marker
+              id="graph-arrow-selected"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="7"
+              markerHeight="7"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={palette.selected} />
+            </marker>
           </defs>
 
           {/* Edges first so nodes paint on top of them. */}
@@ -295,18 +425,36 @@ export default function GraphCanvas({
               if (!from || !to) return null;
               const a = borderPoint(from, to.x, to.y);
               const b = borderPoint(to, from.x, from.y);
+              const isSelectedEdge = selectedEdgeId === edge.id;
               return (
-                <path
-                  key={edge.id}
-                  className="graph-edge"
-                  d={curve(a, b)}
-                  fill="none"
-                  stroke={palette.edge}
-                  strokeWidth={1.4}
-                  strokeDasharray={edge.dashed ? "4 4" : undefined}
-                  opacity={edge.dashed ? 0.65 : 1}
-                  markerEnd={edge.dashed ? undefined : "url(#graph-arrow)"}
-                />
+                <g key={edge.id}>
+                  <path
+                    className="graph-edge"
+                    d={curve(a, b)}
+                    fill="none"
+                    stroke={isSelectedEdge ? palette.selected : palette.edge}
+                    strokeWidth={isSelectedEdge ? 2.4 : 1.4}
+                    strokeDasharray={edge.dashed ? "4 4" : undefined}
+                    opacity={edge.dashed ? 0.65 : 1}
+                    markerEnd={
+                      edge.dashed ? undefined : isSelectedEdge ? "url(#graph-arrow-selected)" : "url(#graph-arrow)"
+                    }
+                  />
+                  {editable && (
+                    <path
+                      className="graph-edge-hit"
+                      d={curve(a, b)}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={14}
+                      onPointerDown={e => e.stopPropagation()}
+                      onClick={e => {
+                        e.stopPropagation();
+                        setSelectedEdgeId(edge.id);
+                      }}
+                    />
+                  )}
+                </g>
               );
             })}
           </g>
@@ -318,17 +466,30 @@ export default function GraphCanvas({
                 ? palette.done
                 : palette.node[node.kind] ?? palette.node.topic;
               const isSelected = selectedId === node.id;
+              const isConnectFrom = connectFrom === node.id;
               return (
                 <g
                   key={node.id}
-                  className={`graph-node graph-node--${node.kind} ${isSelected ? "selected" : ""}`}
+                  className={`graph-node graph-node--${node.kind} ${isSelected ? "selected" : ""} ${isConnectFrom ? "connect-from" : ""}`}
                   tabIndex={0}
                   role="button"
                   aria-label={node.detail ? `${node.label} — ${node.detail}` : node.label}
                   data-selection={isSelected ? "true" : undefined}
-                  onPointerDown={event => event.stopPropagation()}
-                  onClick={() => onSelect?.(node)}
-                  onDoubleClick={() => onOpenNode?.(node)}
+                  onPointerDown={e => startNodeDrag(node, e)}
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleNodeClick(node);
+                  }}
+                  onDoubleClick={e => {
+                    e.stopPropagation();
+                    onOpenNode?.(node);
+                  }}
+                  onPointerUp={e => {
+                    if (nodeDragRef.current) {
+                      (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+                      nodeDragRef.current = null;
+                    }
+                  }}
                   onKeyDown={event => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
@@ -344,8 +505,8 @@ export default function GraphCanvas({
                     height={node.height}
                     rx={7}
                     fill={style.fill}
-                    stroke={isSelected ? palette.selected : style.stroke}
-                    strokeWidth={isSelected ? 2 : 1}
+                    stroke={isConnectFrom ? palette.selected : isSelected ? palette.selected : style.stroke}
+                    strokeWidth={isSelected || isConnectFrom ? 2.5 : 1}
                   />
                   <text
                     x={node.x}
@@ -374,6 +535,32 @@ export default function GraphCanvas({
       )}
 
       <div className="graph-toolbar" onPointerDown={event => event.stopPropagation()}>
+        {editable && (
+          <>
+            <button className="graph-tool" onClick={() => onAddNode?.()} title="Зангилаа нэмэх" aria-label="Зангилаа нэмэх">
+              <Plus size={14} />
+            </button>
+            <button
+              className={`graph-tool ${connectMode ? "active" : ""}`}
+              onClick={() => {
+                if (connectMode) {
+                  setConnectMode(false);
+                  setConnectFrom(null);
+                } else {
+                  setConnectMode(true);
+                  if (selectedId) setConnectFrom(selectedId);
+                }
+              }}
+              title={connectMode ? "Холбох горим идэвхтэй" : "Холбох"}
+              aria-label="Холбох"
+            >
+              <Link2 size={14} />
+            </button>
+            <button className="graph-tool" onClick={() => onResetLayout?.()} title="Анхны байрлалд буцаах" aria-label="Анхны байрлалд буцаах">
+              <RotateCcw size={14} />
+            </button>
+          </>
+        )}
         <button className="graph-tool" onClick={() => zoomAt(1 / 1.2)} title="Жигнэх" aria-label="Жигнэх">
           <ZoomOut size={14} />
         </button>
@@ -398,6 +585,87 @@ export default function GraphCanvas({
           {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
         </button>
       </div>
+
+      {editable && (
+        <div className="graph-editbar" onPointerDown={e => e.stopPropagation()}>
+          {renameId ? (
+            <div className="graph-rename">
+              <input
+                value={renameValue}
+                onChange={e => setRenameValue(e.target.value)}
+                placeholder="Нэр оруулна уу"
+                autoFocus
+                onKeyDown={e => {
+                  if (e.key === "Enter") {
+                    if (renameValue.trim()) {
+                      onRenameNode?.(renameId, renameValue.trim());
+                    }
+                    setRenameId(null);
+                  }
+                  if (e.key === "Escape") setRenameId(null);
+                }}
+              />
+              <button
+                className="secondary-button"
+                onClick={() => {
+                  if (renameValue.trim()) onRenameNode?.(renameId, renameValue.trim());
+                  setRenameId(null);
+                }}
+              >
+                Хадгалах
+              </button>
+              <button className="quiet-button" onClick={() => setRenameId(null)}>
+                Болих
+              </button>
+            </div>
+          ) : selectedEdgeId ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <span className="graph-hint-strong">Ирмэг сонгогдсон</span>
+              <button
+                className="graph-tool danger"
+                onClick={() => {
+                  onDeleteEdge?.(selectedEdgeId);
+                  setSelectedEdgeId(null);
+                }}
+              >
+                Устгах
+              </button>
+            </div>
+          ) : selectedNode ? (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <span className="graph-hint-strong">{selectedNode.label}</span>
+              <button
+                className="graph-tool"
+                onClick={() => {
+                  setRenameId(selectedNode.id);
+                  setRenameValue(selectedNode.label);
+                }}
+              >
+                Нэрлэх
+              </button>
+              <button
+                className="graph-tool"
+                onClick={() => {
+                  setConnectMode(true);
+                  setConnectFrom(selectedNode.id);
+                }}
+              >
+                Холбох
+              </button>
+              <button className="graph-tool danger" onClick={() => onDeleteNode?.(selectedNode.id)}>
+                Устгах
+              </button>
+            </div>
+          ) : connectMode ? (
+            <span className="graph-hint">
+              <span className="graph-hint-strong">Холбох горим:</span>{" "}
+              {connectFrom ? "Хоёр дахь зангилааг сонгоно уу" : "Эхний зангилааг сонгоно уу"} — Esc дарж болих
+            </span>
+          ) : (
+            <span className="graph-hint">Зангилаа чирж байрлуулна. Давхар дарж нээнэ. Delete дарж устгана.</span>
+          )}
+        </div>
+      )}
     </div>
   );
 

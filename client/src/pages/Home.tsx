@@ -5,8 +5,8 @@ import {
   Award,
   BookOpen,
   CalendarDays,
+  ChartBar,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Circle,
@@ -20,9 +20,7 @@ import {
   EyeOff,
   FileCode,
   FileText,
-  Filter,
   FlaskConical,
-  FolderKanban,
   Hash,
   ImagePlus,
   Key,
@@ -38,12 +36,10 @@ import {
   RotateCcw,
   Search,
   Server,
-  Share2,
   Shield,
   Sparkles,
   Sun,
   Target,
-  Terminal,
   TerminalSquare,
   Trash2,
   Upload,
@@ -74,6 +70,8 @@ import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import DocumentDiagram from "@/components/DocumentDiagram";
 import KnowledgeAtlas from "@/components/KnowledgeAtlas";
+import InsightsDashboard from "@/components/InsightsDashboard";
+import { editKey } from "@/lib/graphEdits";
 import {
   buildConceptNetwork,
   buildReportDiagram,
@@ -82,7 +80,6 @@ import {
   type DiagramKind,
   type PositionedGraph,
 } from "@/lib/visualModel";
-// Type-only: erased at build time, so no server code reaches the browser bundle.
 import type { AnalysisResult } from "../../../server/aiAnalyzer";
 
 export type ReportStatus = "Draft" | "Published";
@@ -308,10 +305,9 @@ const navItems = [
   { label: "Замын зураг", icon: Target },
   { label: "Атлас", icon: Network },
   { label: "Диаграм", icon: Waypoints },
+  { label: "Дүн шинжилгээ", icon: ChartBar },
 ];
 
-// Icons for the five roadmap tracks. Track data lives in data/roadmapTracks.ts —
-// the single source of truth (more detailed sections get added there).
 const trackIcons: Record<string, typeof Compass> = {
   "thm-free-path": Compass,
   "pico-ctf-cylab": FlaskConical,
@@ -368,6 +364,31 @@ const reportTemplates = [
   },
 ];
 
+function quickHash(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return hash;
+}
+
+function normalizeNoteMarkdown(md: string): string {
+  let out = String(md ?? "");
+  out = out
+    .split("\n")
+    .filter(line => !line.includes("ADD THIS TO YOUR OBSIDIAN VAULT"))
+    .join("\n");
+  out = out.replace(/^Tags:\s*.*$/gim, "");
+  out = out.replace(/^>\s*\[!note\]\s*/gim, "> ");
+  const lines = out.split("\n");
+  const quoteLines = lines.filter(l => l.trim().startsWith(">")).length;
+  if (lines.length > 0 && quoteLines / lines.length > 0.6) {
+    out = lines.map(l => l.replace(/^>\s?/, "")).join("\n");
+  }
+  out = out.replace(/==([^=]+)==/g, "**$1**");
+  return out;
+}
+
 function readReports(): Report[] {
   try {
     const saved = localStorage.getItem("operator-dossier-reports");
@@ -389,7 +410,6 @@ function readReports(): Report[] {
   }
 }
 
-/** "Sep 14, 2026" — the date format the rest of the app and exports expect. */
 export function formatReportDate(date: Date): string {
   return date.toLocaleDateString("en-US", {
     month: "short",
@@ -398,7 +418,6 @@ export function formatReportDate(date: Date): string {
   });
 }
 
-/** Best-effort parse of the display date format; null when unparseable. */
 export function parseReportDate(value: string): Date | null {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
@@ -406,12 +425,6 @@ export function parseReportDate(value: string): Date | null {
 
 let localStorageFullWarned = false;
 
-/**
- * localStorage.setItem throws QuotaExceededError once the ~5 MB budget is
- * exhausted (the imported knowledge base alone is ~0.5 MB; a few screenshot
- * attachments fill the rest). Throwing inside a React effect crashes the
- * whole app into the error boundary, so catch and warn once instead.
- */
 function safeSetItem(key: string, value: string) {
   try {
     localStorage.setItem(key, value);
@@ -467,11 +480,6 @@ function savePlaybooks(playbooks: PlaybookItem[]) {
   localStorage.setItem("operator-dossier-playbooks", JSON.stringify(playbooks));
 }
 
-/**
- * Track progress: `${trackId}:${itemId}` -> completed. All five roadmap tracks
- * share one map. HTTP Free Path item ids equal the old room ids, so the legacy
- * single-track store is migrated once by prefixing "thm-free-path:".
- */
 function readTrackProgress(): Record<string, boolean> {
   let next: Record<string, boolean> = {};
   try {
@@ -494,9 +502,7 @@ function readTrackProgress(): Record<string, boolean> {
         }
       }
     }
-  } catch {
-    // Corrupt legacy store: nothing to migrate.
-  }
+  } catch {}
   return next;
 }
 
@@ -512,17 +518,6 @@ function getWorkspaceKey() {
   return next;
 }
 
-/**
- * Per-workspace map of report id → last server timestamp known to this
- * device. This is what makes multi-device sync safe (AUDIT.md §5.5): the
- * server keeps the NEWER copy of each report it receives, so the client has
- * to present the timestamp of the copy it is sending. Stored per workspace
- * key so switching workspaces never mixes timestamps.
- *
- * A deleted report stays in this map on purpose — the entry acts as a
- * tombstone telling the server "I know this id and I dropped it", which is
- * how deletions propagate without a fresh device wiping the vault.
- */
 function reportMetaStorageKey(workspaceKey: string) {
   return `operator-dossier-report-meta:${workspaceKey}`;
 }
@@ -535,9 +530,7 @@ function readReportMeta(workspaceKey: string): Record<string, string> {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Record<string, string>;
     }
-  } catch {
-    // Corrupt meta: start over — the server's copy is authoritative anyway.
-  }
+  } catch {}
   return {};
 }
 
@@ -545,18 +538,12 @@ function saveReportMeta(workspaceKey: string, meta: Record<string, string>) {
   safeSetItem(reportMetaStorageKey(workspaceKey), JSON.stringify(meta));
 }
 
-/** Stamp a locally edited report as "changed now" so the next sync wins. */
 function touchReportMeta(workspaceKey: string, id: number) {
   const meta = readReportMeta(workspaceKey);
   meta[String(id)] = new Date().toISOString();
   saveReportMeta(workspaceKey, meta);
 }
 
-// Public view (?public=1 / shared link, AUDIT.md §5.3): the workspace is
-// browsable by anyone holding the link, so only Published, non-archived
-// reports are shown and every mutation is locked. The URL flag always wins
-// over the local setting — a shared link must show the public site even in
-// the owner's browser.
 const PUBLIC_VIEW_STORAGE_KEY = "operator-dossier-public-view";
 
 function initialPublicView(): boolean {
@@ -625,21 +612,14 @@ function parseObsidianMarkdown(
   };
 }
 
-// Real Markdown rendering. The old version only understood "## " headings and
-// blank lines, so every code fence, table, list, link and <details> block in
-// the imported knowledge base rendered as raw text. Content is sanitized with
-// DOMPurify because reports can originate from Obsidian imports (untrusted).
 function MarkdownPreview({ content }: { content: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   const html = useMemo(() => {
-    // async:false makes parse() return a string synchronously.
-    const raw = marked.parse(content, { gfm: true, breaks: false, async: false });
+    const raw = marked.parse(normalizeNoteMarkdown(content), { gfm: true, breaks: false, async: false });
     return DOMPurify.sanitize(String(raw), { ADD_ATTR: ["target"] });
   }, [content]);
 
-  // Inject a copy button into every fenced code block (delegated, so it
-  // survives re-renders).
   useEffect(() => {
     const root = containerRef.current;
     if (!root) return;
@@ -689,7 +669,6 @@ export default function Home() {
   const [sortMode, setSortMode] = useState<"newest" | "oldest" | "title" | "readTime">("newest");
   const [mobileNav, setMobileNav] = useState(false);
 
-  // Modals & Drawers
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingReportId, setEditingReportId] = useState<number | null>(null);
   const [selectedPlaybook, setSelectedPlaybook] = useState<PlaybookItem | null>(null);
@@ -701,7 +680,6 @@ export default function Home() {
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [optionsMenuOpen, setOptionsMenuOpen] = useState(false);
 
-  // Form states for Report
   const [newTitle, setNewTitle] = useState("");
   const [newRoom, setNewRoom] = useState("");
   const [newStage, setNewStage] = useState("Foundations");
@@ -710,14 +688,12 @@ export default function Home() {
   const [newContent, setNewContent] = useState("");
   const [attachment, setAttachment] = useState<string | undefined>();
 
-  // Form states for Task
   const [addingTaskGroup, setAddingTaskGroup] = useState<"today" | "tomorrow" | "later" | null>(null);
   const [newTaskTitle, setNewTaskTitle] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<number | null>(null);
   const [editingTaskTitle, setEditingTaskTitle] = useState("");
   const [editingTaskDetail, setEditingTaskDetail] = useState("");
 
-  // Form states for Playbook
   const [newPbTitle, setNewPbTitle] = useState("");
   const [newPbCategory, setNewPbCategory] = useState<"linux" | "network" | "cloud" | "windows">("linux");
   const [newPbDesc, setNewPbDesc] = useState("");
@@ -725,39 +701,29 @@ export default function Home() {
   const [newPbCmdLabel, setNewPbCmdLabel] = useState("");
   const [newPbCmdText, setNewPbCmdText] = useState("");
 
-  // Calendar state
   const [calMonthOffset, setCalMonthOffset] = useState(0);
   const [selectedDay, setSelectedDay] = useState<number | null>(new Date().getDate());
 
-  // Round 4 — visual modules (Knowledge Atlas / Document-to-Diagram)
   const [diagramSource, setDiagramSource] = useState<
     { type: "report"; id: number } | { type: "track"; id: string }
   >({ type: "report", id: 1 });
   const [diagramKind, setDiagramKind] = useState<DiagramKind>("mindmap");
-  // Track trees can show sections only, or every single item.
   const [trackDiagramFull, setTrackDiagramFull] = useState(false);
-  // Result of the optional AI analysis (local by default, Moonshot when set up).
   const [aiResult, setAiResult] = useState<AnalysisResult | null>(null);
 
-  // Public (shared) view mode — see initialPublicView().
   const [publicView, setPublicView] = useState(initialPublicView);
 
   function setPublicViewMode(next: boolean) {
     setPublicView(next);
     try {
       localStorage.setItem(PUBLIC_VIEW_STORAGE_KEY, next ? "1" : "0");
-      // Keep the address bar shareable: the current link reflects the mode.
       const url = new URL(window.location.href);
       if (next) url.searchParams.set("public", "1");
       else url.searchParams.delete("public");
       window.history.replaceState(null, "", url.toString());
-    } catch {
-      // Non-fatal: mode still works in-memory for this tab.
-    }
+    } catch {}
   }
 
-  // Single choke point so no mutation can slip through a hidden control or a
-  // keyboard shortcut while the shared link is open.
   function guardPublicMode(): boolean {
     if (publicView) {
       toast.info(
@@ -772,9 +738,6 @@ export default function Home() {
   const obsidianInput = useRef<HTMLInputElement>(null);
   const backupInput = useRef<HTMLInputElement>(null);
   const mongoHydrated = useRef(false);
-  // Set while a workspace-key switch is waiting for the new key's list.
-  // Gates the persist effect (never sync old workspace data into the new
-  // key) and the hydration merge (no cross-workspace report leakage).
   const workspaceSwitched = useRef(false);
 
   const mongoReports = trpc.reports.list.useQuery(
@@ -782,15 +745,68 @@ export default function Home() {
     { retry: false }
   );
   const mongoStatus = trpc.reports.status.useQuery(undefined, { retry: false });
-  // `sync` mirrors the full workspace (upsert + delete + rebuild tags), so
-  // deletions actually propagate. The old upsert-only call made deleted
-  // reports come back on the next load.
   const persistReports = trpc.reports.sync.useMutation();
   const isCloudBackend = mongoStatus.data?.backend === "mongodb";
 
-  // Hydrate once the cloud list arrives. `reports` here is the initial local
-  // state: the persist effect is gated on this same ref, so nothing else can
-  // have changed it before hydration runs.
+  const trpcUtils = trpc.useUtils();
+  const insightsQuery = trpc.ai.insights.atlas.useQuery({ workspaceKey }, { retry: false, staleTime: 0 });
+  const refreshInsightsMutation = trpc.ai.insights.refresh.useMutation();
+
+  const reportsFingerprint = useMemo(() => {
+    return reports
+      .map(r => `${r.id}:${quickHash(r.title + r.content)}:${r.tags.join(",")}`)
+      .sort()
+      .join("|");
+  }, [reports]);
+
+  useEffect(() => {
+    if (reportsFingerprint) {
+      trpcUtils.ai.insights.atlas.invalidate({ workspaceKey });
+    }
+  }, [reportsFingerprint, workspaceKey, trpcUtils]);
+
+  const aiSummary = useMemo(() => {
+    const snap = insightsQuery.data?.snapshot;
+    if (!snap) return null;
+    const conceptCounts = new Map<string, number>();
+    for (const ins of insightsQuery.data?.insights ?? []) {
+      for (const c of ins.concepts ?? []) {
+        const key = String(c).trim();
+        if (!key) continue;
+        conceptCounts.set(key, (conceptCounts.get(key) ?? 0) + 1);
+      }
+    }
+    const topConcepts = [...conceptCounts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 12)
+      .map(([c]) => c);
+    return {
+      provider: snap.provider,
+      model: snap.model,
+      analyzed: snap.analyzed,
+      total: snap.total,
+      concepts: topConcepts,
+    };
+  }, [insightsQuery.data]);
+
+  const selectedInsight = useMemo(() => {
+    if (!insightsQuery.data) return null;
+    return insightsQuery.data.insights.find(i => i.id === selectedId) ?? null;
+  }, [insightsQuery.data, selectedId]);
+
+  function refreshInsights() {
+    refreshInsightsMutation.mutate(
+      { workspaceKey },
+      {
+        onSuccess: () => {
+          toast.success("AI шинжилгээ шинэчлэгдлээ");
+          trpcUtils.ai.insights.atlas.invalidate({ workspaceKey });
+        },
+        onError: () => toast.error("Дахин шинжлэх амжилтгүй"),
+      }
+    );
+  }
+
   useEffect(() => {
     if (!mongoReports.data || mongoHydrated.current) return;
     if (mongoReports.data.length) {
@@ -801,8 +817,6 @@ export default function Home() {
         source: note.source as Report["source"],
         status: note.status as ReportStatus,
       }));
-      // A shared link shows the workspace as-is — never mix in this
-      // browser's local drafts into the public view.
       const localOnly = publicView
         ? []
         : reports.filter(
@@ -813,15 +827,10 @@ export default function Home() {
       const mergedReports = [
         ...remoteReports,
         ...imported.filter(note => !remoteReports.some(report => report.id === note.id)),
-        // Keep local-only reports (e.g. created while offline) so a reload
-        // never discards unsynced work.
         ...localOnly,
       ];
       setReports(mergedReports);
       setSelectedId(mergedReports[0]?.id || 1);
-      // Learn the server's per-report timestamps so a sync from this device
-      // can never blindly overwrite a newer copy made elsewhere. Only fill
-      // ids we don't already have a pending local timestamp for.
       const meta = readReportMeta(workspaceKey);
       let metaChanged = false;
       for (const row of remoteReports) {
@@ -833,18 +842,9 @@ export default function Home() {
       if (metaChanged) saveReportMeta(workspaceKey, meta);
     }
     mongoHydrated.current = true;
-    // New workspace is now authoritative — re-enable persistence to it.
     workspaceSwitched.current = false;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mongoReports.data]);
 
-  /**
-   * Adopt the post-merge workspace state the server returned (AUDIT.md §5.5):
-   * - refresh the timestamp sidecar from the response;
-   * - for reports whose server copy is newer than what this device last knew
-   *   (edited on another device), adopt the server's fields;
-   * - add server-only reports a fresh device didn't have yet.
-   */
   function adoptSyncedState(
     result:
       | { persisted: boolean; count: number; reports: (Report & { updatedAt: string })[] }
@@ -872,7 +872,6 @@ export default function Home() {
           byId.set(row.id, serverReport as Report);
           changed = true;
         } else if (meta[String(row.id)] !== row.updatedAt) {
-          // Server kept a newer copy of this report — adopt it.
           byId.set(row.id, { ...local, ...serverReport } as Report);
           changed = true;
         }
@@ -884,9 +883,6 @@ export default function Home() {
   const lastSyncFailureToast = useRef(0);
   useEffect(() => {
     saveReports(reports);
-    // A shared-link visitor only browses: never let this tab write to the
-    // workspace (and never overwrite the owner's cloud state with a
-    // visitor's stale local data).
     if (
       mongoHydrated.current &&
       !workspaceSwitched.current &&
@@ -899,15 +895,12 @@ export default function Home() {
           workspaceKey,
           reports: reports.map(report => ({
             ...report,
-            // No local timestamp yet → "changed just now" (legacy behavior).
             updatedAt: meta[String(report.id)] ?? new Date().toISOString(),
           })),
           seenIds: Object.keys(meta).map(Number).filter(Number.isFinite),
         },
         {
           onError: (error) => {
-            // Surface sync failure once per 30 s (the effect refires on every
-            // edit, so without throttling this would spam toasts).
             const now = Date.now();
             if (now - lastSyncFailureToast.current < 30_000) return;
             lastSyncFailureToast.current = now;
@@ -923,7 +916,6 @@ export default function Home() {
         }
       );
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reports, workspaceKey, publicView]);
 
   useEffect(() => {
@@ -941,12 +933,9 @@ export default function Home() {
   useEffect(() => {
     try {
       localStorage.setItem("operator-dossier-active-track", activeTrackId);
-    } catch {
-      // Non-fatal: track selection just won't survive a reload.
-    }
+    } catch {}
   }, [activeTrackId]);
 
-  // Global Keyboard Shortcuts (Ctrl+K for search, Escape for closing modals)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -968,8 +957,6 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Public view (?public=1 / shared link) only shows Published, non-archived
-  // reports; every display surface below reads from visibleReports.
   const visibleReports = useMemo<Report[]>(
     () =>
       publicView
@@ -1022,7 +1009,6 @@ export default function Home() {
     report => report.status === "Published"
   ).length;
   const completedTasksCount = tasks.filter(t => t.completed).length;
-  // Per-track completion across all five roadmap tracks.
   const trackStatsMap = useMemo(() => {
     const map: Record<string, TrackStats> = {};
     for (const track of roadmapTracks) {
@@ -1032,8 +1018,6 @@ export default function Home() {
   }, [trackProgress]);
   const activeTrack: Track =
     roadmapTracks.find(track => track.id === activeTrackId) || roadmapTracks[0];
-
-  /* ---- Round 4: atlas / diagram wiring ---- */
 
   const atlasQuery = trpc.ai.status.useQuery(undefined, { retry: false });
   const aiAnalyze = trpc.ai.analyze.useMutation();
@@ -1047,7 +1031,6 @@ export default function Home() {
       ? roadmapTracks.find(track => track.id === diagramSource.id)
       : undefined;
 
-  // The AI concept map replaces the structural diagram while a result is held.
   const diagramGraph = useMemo<PositionedGraph>(() => {
     if (aiResult && diagramReport) {
       return layoutGraph(
@@ -1065,6 +1048,36 @@ export default function Home() {
     }
     return { title: "", nodes: [], edges: [], width: 0, height: 0 };
   }, [aiResult, diagramReport, diagramKind, diagramTrack, trackProgress, trackDiagramFull]);
+
+  const diagramAiInsight = useMemo(() => {
+    if (!diagramReport) return null;
+    if (aiResult && diagramReport) {
+      return {
+        id: diagramReport.id,
+        title: diagramReport.title,
+        source: diagramReport.source,
+        stage: diagramReport.stage,
+        tags: diagramReport.tags,
+        summary: aiResult.summary,
+        concepts: aiResult.concepts,
+        steps: aiResult.steps,
+        provider: aiResult.provider,
+        model: aiResult.model,
+      } as any;
+    }
+    return insightsQuery.data?.insights.find(i => i.id === diagramReport.id) ?? null;
+  }, [diagramReport, aiResult, insightsQuery.data]);
+
+  const relatedNotes = useMemo(() => {
+    if (!insightsQuery.data || !selectedReport) return [];
+    const rels = insightsQuery.data.relations.filter(r => r.source === selectedReport.id || r.target === selectedReport.id);
+    const sorted = [...rels].sort((a, b) => b.weight - a.weight).slice(0, 6);
+    return sorted.map(r => {
+      const otherId = r.source === selectedReport.id ? r.target : r.source;
+      const other = visibleReports.find(rep => rep.id === otherId);
+      return { ...r, otherId, otherTitle: other?.title ?? `Тайлан ${otherId}` };
+    });
+  }, [insightsQuery.data, selectedReport, visibleReports]);
 
   function openReportInReader(reportId: number) {
     setSelectedId(reportId);
@@ -1109,7 +1122,6 @@ export default function Home() {
     );
   }
 
-  // Editor Actions
   function openNewReportEditor() {
     if (guardPublicMode()) return;
     setEditingReportId(null);
@@ -1170,9 +1182,6 @@ export default function Home() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    // Screenshots are stored as base64 in localStorage AND MongoDB. Without a
-    // cap a single 10 MB screenshot bloats every sync payload and can push
-    // localStorage past its ~5 MB quota (which used to crash the app).
     const MAX_ATTACHMENT_BYTES = 1.5 * 1024 * 1024;
     if (!file.type.startsWith("image/")) {
       toast.error("Зөвхөн зургын файл (PNG / JPG / WEBP) сонгоно уу");
@@ -1207,7 +1216,6 @@ export default function Home() {
         .slice(0, 140) || "Шинэ тайлангийн тэмдэглэл.";
 
     if (editingReportId) {
-      // Edit existing
       setReports(current =>
         current.map(item =>
           item.id === editingReportId
@@ -1228,7 +1236,6 @@ export default function Home() {
       touchReportMeta(workspaceKey, editingReportId);
       toast.success("Тайлан амжилттай шинэчлэгдлээ!");
     } else {
-      // Create new
       const report: Report = {
         id: Date.now(),
         title: newTitle.trim(),
@@ -1245,8 +1252,6 @@ export default function Home() {
         ),
         status: "Draft",
         readTime: calculatedReadTime,
-        // Real creation date — previously every new report was stamped
-        // "Sep 14, 2026".
         date: formatReportDate(new Date()),
         excerpt: calculatedExcerpt,
         content: newContent,
@@ -1315,9 +1320,6 @@ export default function Home() {
     toast.success("Бүх тайланг файлд нэгтгэн татлаа");
   }
 
-  /** Full JSON backup — the only lossless format (Markdown export drops
-   *  tasks, playbooks, THM progress and attachments). Locked in public view:
-   *  a backup contains Draft reports, which visitors must not receive. */
   function exportBackupJson() {
     if (guardPublicMode()) return;
     const payload = {
@@ -1331,7 +1333,7 @@ export default function Home() {
       trackProgress,
     };
     downloadText(
-      `operator-dossier-backup-${formatReportDate(new Date()).replace(/[,\s]+/g, "-")}.json`,
+      `operator-dossier-backup-${formatReportDate(new Date()).replace(/[,\\s]+/g, "-")}.json`,
       JSON.stringify(payload, null, 2),
       "application/json"
     );
@@ -1377,7 +1379,6 @@ export default function Home() {
         if (data.trackProgress && typeof data.trackProgress === "object") {
           setTrackProgress(data.trackProgress as Record<string, boolean>);
         } else if (data.thmProgress && typeof data.thmProgress === "object") {
-          // Backward-compatible: pre-Round-3 backups carry thmProgress.
           const migrated = (data.thmProgress as Record<string, boolean>) || {};
           setTrackProgress(current => {
             const next = { ...current };
@@ -1399,7 +1400,6 @@ export default function Home() {
     if (guardPublicMode()) return;
     if (editingWorkspaceKey === null) return;
     const next = editingWorkspaceKey.trim();
-    // Server schema: 12–160 chars.
     if (next.length < 12 || next.length > 160) {
       toast.error("Ажлын түлхүүр 12–160 тэмдэгтэй байх ёстой");
       return;
@@ -1408,9 +1408,6 @@ export default function Home() {
       setEditingWorkspaceKey(null);
       return;
     }
-    // Enter the new workspace cleanly: reset to the canonical fresh state
-    // and arm the switch guard so the current (old workspace) data is never
-    // synced into the new key before its list has been fetched.
     setReports([
       ...initialReports,
       ...importedKnowledgeNotes.map(note => ({
@@ -1499,7 +1496,6 @@ export default function Home() {
     });
   }
 
-  // Task Actions
   function toggleTask(id: number) {
     if (guardPublicMode()) return;
     setTasks(current =>
@@ -1568,7 +1564,6 @@ export default function Home() {
     toast.success("Даалгавар шинэчлэгдлээ");
   }
 
-  // Playbook Creator Action
   function createPlaybook() {
     if (guardPublicMode()) return;
     if (!newPbTitle.trim()) {
@@ -1596,22 +1591,17 @@ export default function Home() {
     toast.success("Шинэ playbook амжилттай бүртгэгдлээ!");
   }
 
-  // Real month navigation: the displayed month is "today's month + offset".
-  // Previously this was a hardcoded 3-month array (Aug–Oct 2026) and a fixed
-  // 31+30 day grid, so the calendar never matched the actual date.
   const now = useMemo(() => new Date(), []);
   const displayed = useMemo(() => {
     const base = new Date(now.getFullYear(), now.getMonth() + calMonthOffset, 1);
     const year = base.getFullYear();
     const month = base.getMonth();
     const daysInMonth = new Date(year, month + 1, 0).getDate();
-    // Monday-first offset so the grid lines up with the M T W T F S S header.
     const firstWeekday = (new Date(year, month, 1).getDay() + 6) % 7;
     return { year, month, daysInMonth, firstWeekday };
   }, [now, calMonthOffset]);
   const currentMonthDisplay = `${displayed.year} оны ${displayed.month + 1}-р сар`;
 
-  // Days that actually have a (visible) report, keyed by "YYYY-M-D".
   const reportDays = useMemo(() => {
     const set = new Set<string>();
     for (const r of visibleReports) {
@@ -1647,13 +1637,11 @@ export default function Home() {
   const isCurrentMonth =
     displayed.year === now.getFullYear() && displayed.month === now.getMonth();
 
-  // Quick Command Palette matches
   const commandResults = useMemo(() => {
     if (!commandSearch.trim()) return [];
     const q = commandSearch.toLowerCase();
     const matches: { title: string; subtitle: string; category: string; onSelect: () => void }[] = [];
 
-    // Reports
     visibleReports.forEach(r => {
       if (r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))) {
         matches.push({
@@ -1669,7 +1657,6 @@ export default function Home() {
       }
     });
 
-    // Playbooks
     playbooks.forEach(p => {
       if (p.title.toLowerCase().includes(q) || p.description.toLowerCase().includes(q)) {
         matches.push({
@@ -1685,7 +1672,6 @@ export default function Home() {
       }
     });
 
-    // Tasks
     tasks.forEach(t => {
       if (t.title.toLowerCase().includes(q)) {
         matches.push({
@@ -1705,7 +1691,6 @@ export default function Home() {
 
   return (
     <div className="app-shell">
-      {/* Sidebar */}
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
         <div className="brand-block">
           <div className="brand-mark">
@@ -1771,7 +1756,7 @@ export default function Home() {
             );
           })}
         </div>
-<div
+        <div
           className="sidebar-footer clickable-card"
           onClick={() => setProfileOpen(true)}
           title="Операторын тохиргоо"
@@ -1785,7 +1770,6 @@ export default function Home() {
         </div>
       </aside>
 
-      {/* Main Area */}
       <main className="main-canvas">
         <header className="topbar">
           <button className="mobile-menu" onClick={() => setMobileNav(true)}>
@@ -1837,7 +1821,6 @@ export default function Home() {
               O
             </div>
 
-            {/* Notifications Popup */}
             {notifOpen && (
               <div className="dropdown-popup">
                 <h4>Үйлдлийн мэдэгдэл</h4>
@@ -1861,7 +1844,6 @@ export default function Home() {
           </div>
         </header>
 
-        {/* Public (shared) view banner */}
         {publicView && (
           <div className="public-banner">
             <Shield size={14} />
@@ -1875,7 +1857,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* View 1: Dashboard (Ерөнхий) */}
         {activeNav === "Ерөнхий" && (
           <>
             <section className="hero-row">
@@ -1919,7 +1900,6 @@ export default function Home() {
 
             <section className="dashboard-grid">
               <div className="left-column">
-                {/* Interactive Mini Calendar */}
                 <div className="calendar-wrap">
                   <div className="month-row">
                     <span>{currentMonthDisplay}</span>
@@ -1979,7 +1959,6 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Completion Ring */}
                 <div className="completion-ring">
                   <div className="ring">
                     <span>
@@ -1995,10 +1974,8 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Heatmap */}
                 <Heatmap reports={visibleReports} />
 
-                {/* Weekly Stats */}
                 <div className="weekly-stats">
                   <div className="section-kicker">7 хоногийн статистик</div>
                   <div className="stat-row">
@@ -2017,7 +1994,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Right Column: Dynamic Task Queue */}
               <div className="right-column">
                 <div className="section-header">
                   <div>
@@ -2152,7 +2128,6 @@ export default function Home() {
                           );
                         })}
 
-                        {/* Inline Task Adder */}
                         {addingTaskGroup === grp && (
                           <div className="add-task-box">
                             <input
@@ -2192,7 +2167,6 @@ export default function Home() {
               </div>
             </section>
 
-            {/* Roadmap Section — five tracks */}
             <section className="roadmap-section">
               <div className="section-header">
                 <div>
@@ -2239,7 +2213,6 @@ export default function Home() {
           </>
         )}
 
-        {/* View 2: Reports (Тайлан) */}
         {activeNav === "Тайлан" && (
           <section className="reports-page">
             <div className="page-title-row">
@@ -2287,7 +2260,6 @@ export default function Home() {
             </div>
 
             <div className="reports-layout">
-              {/* Left Panel: Search & List */}
               <div className="report-list-panel">
                 <div className="report-toolbar">
                   <div className="search-field">
@@ -2431,7 +2403,6 @@ export default function Home() {
                 )}
               </div>
 
-              {/* Right Panel: Detail View */}
               <div className="report-detail-panel">
                 {selectedReport ? (
                   <>
@@ -2509,6 +2480,11 @@ export default function Home() {
                       <span>
                         <CalendarDays size={13} /> {selectedReport.date}
                       </span>
+                      {selectedInsight && (
+                        <span className="ai-badge" title={selectedInsight.summary}>
+                          <Sparkles size={11} /> {selectedInsight.provider === "moonshot" ? "AI" : "Local"} · {selectedInsight.concepts.slice(0,2).join(", ")}
+                        </span>
+                      )}
                     </div>
 
                     <div className="tag-row">
@@ -2518,6 +2494,10 @@ export default function Home() {
                         </button>
                       ))}
                     </div>
+
+                    <button className="read-full-button" onClick={openReportReader}>
+                      <BookOpen size={14} /> Бүтэн унших
+                    </button>
 
                     <div className="detail-divider" />
                     <MarkdownPreview content={selectedReport.content} />
@@ -2551,6 +2531,12 @@ export default function Home() {
                       >
                         <Copy size={14} /> Хуулах
                       </button>
+                      <button
+                        className="export-button"
+                        onClick={() => openDiagramForReport(selectedReport.id)}
+                      >
+                        <Waypoints size={14} /> Диаграм
+                      </button>
                       {!publicView && (
                         <button
                           className="secondary-button"
@@ -2560,13 +2546,6 @@ export default function Home() {
                           Засах
                         </button>
                       )}
-                      <button
-                        className="secondary-button"
-                        onClick={openReportReader}
-                        title="Тайланг төвлөрсөн уншигч горимоор нээх"
-                      >
-                        <BookOpen size={14} /> Бүтэн унших
-                      </button>
                       {!publicView && (
                         <>
                           <button
@@ -2588,6 +2567,19 @@ export default function Home() {
                         </>
                       )}
                     </div>
+
+                    {relatedNotes.length > 0 && (
+                      <div className="related-strip">
+                        <div className="section-kicker">Холбоотой тэмдэглэлүүд</div>
+                        <div className="related-chips">
+                          {relatedNotes.map(r => (
+                            <button key={r.otherId} className="related-chip" onClick={() => openReportInReader(r.otherId)} title={r.reason}>
+                              {r.otherTitle} <small>· {(r.weight*100).toFixed(0)}%</small>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : (
                   <div style={{ padding: "40px", textAlign: "center", color: "var(--muted)" }}>
@@ -2599,7 +2591,6 @@ export default function Home() {
           </section>
         )}
 
-        {/* View 2b: Focused report reader */}
         {activeNav === "Тайлан-уншилт" && (
           <section className="report-reader-page">
             {selectedReport ? (
@@ -2629,6 +2620,31 @@ export default function Home() {
                   </div>
                 </div>
 
+                <div className="reader-actions-top">
+                  <button className="export-button" onClick={exportSelectedMarkdown}>
+                    <Download size={14} /> Markdown
+                  </button>
+                  <button className="export-button" onClick={exportSelectedPdf}>
+                    <Printer size={14} /> Хэвлэх (PDF)
+                  </button>
+                  <button className="export-button" onClick={() => copyMarkdownToClipboard(selectedReport)}>
+                    <Copy size={14} /> Хуулах
+                  </button>
+                  <button className="export-button" onClick={() => openDiagramForReport(selectedReport.id)}>
+                    <Waypoints size={14} /> Диаграм
+                  </button>
+                  {!publicView && (
+                    <button className="secondary-button" onClick={() => openEditReport(selectedReport)}>
+                      Засах
+                    </button>
+                  )}
+                  {selectedInsight && (
+                    <span className="ai-badge">
+                      {selectedInsight.provider === "moonshot" ? `AI · ${selectedInsight.model}` : "Орон нутгийн шинжилгээ"} · {selectedInsight.concepts.slice(0,3).join(", ")}
+                    </span>
+                  )}
+                </div>
+
                 <article className="report-reader-content">
                   <div className="detail-kicker">
                     {selectedReport.source} / {selectedReport.stage.toUpperCase()}
@@ -2651,28 +2667,19 @@ export default function Home() {
                   {selectedReport.image && (
                     <img className="report-image" src={selectedReport.image} alt="Report attachment" />
                   )}
-                  <div className="detail-actions">
-                    <button className="export-button" onClick={exportSelectedMarkdown}>
-                      <Download size={14} /> Markdown
-                    </button>
-                    <button className="export-button" onClick={exportSelectedPdf}>
-                      <Printer size={14} /> Хэвлэх (PDF)
-                    </button>
-                    <button className="export-button" onClick={() => copyMarkdownToClipboard(selectedReport)}>
-                      <Copy size={14} /> Хуулах
-                    </button>
-                    <button
-                      className="export-button"
-                      onClick={() => openDiagramForReport(selectedReport.id)}
-                    >
-                      <Waypoints size={14} /> Диаграм
-                    </button>
-                    {!publicView && (
-                      <button className="secondary-button" onClick={() => openEditReport(selectedReport)}>
-                        Засах
-                      </button>
-                    )}
-                  </div>
+
+                  {relatedNotes.length > 0 && (
+                    <div className="related-strip">
+                      <div className="section-kicker">Холбоотой тэмдэглэлүүд</div>
+                      <div className="related-chips">
+                        {relatedNotes.map(r => (
+                          <button key={r.otherId} className="related-chip" onClick={() => openReportInReader(r.otherId)} title={r.reason}>
+                            {r.otherTitle} <small>· {(r.weight*100).toFixed(0)}% — {r.reason}</small>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </article>
               </>
             ) : (
@@ -2685,7 +2692,6 @@ export default function Home() {
           </section>
         )}
 
-        {/* View 3: Playbooks (Сургалт) */}
         {activeNav === "Сургалт" && (
           <section className="simple-page">
             <div className="page-title-row">
@@ -2734,7 +2740,6 @@ export default function Home() {
           </section>
         )}
 
-        {/* View 4: Roadmap (Замын зураг) — five tracks */}
         {activeNav === "Замын зураг" && (
           <section className="simple-page">
             <div className="page-title-row">
@@ -2749,7 +2754,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Track switcher */}
             <div className="track-switcher" role="tablist" aria-label="Roadmap track-ууд">
               {roadmapTracks.map(track => {
                 const Icon = trackIcons[track.id] || Compass;
@@ -2770,7 +2774,6 @@ export default function Home() {
               })}
             </div>
 
-            {/* Track overview rows */}
             <div className="roadmap-large">
               {roadmapTracks.map(track => {
                 const Icon = trackIcons[track.id] || Compass;
@@ -2802,7 +2805,6 @@ export default function Home() {
               })}
             </div>
 
-            {/* Selected track: progress summary */}
             <div className="thm-progress-summary">
               <div>
                 <div className="section-kicker">{activeTrack.name} tracker</div>
@@ -2819,7 +2821,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Selected track: sections & items */}
             <div className="thm-room-tracker">
               <div className="section-header">
                 <div>
@@ -2930,7 +2931,6 @@ export default function Home() {
           </section>
         )}
 
-        {/* View 6: Knowledge Atlas (Атлас) */}
         {activeNav === "Атлас" && (
           <section className="simple-page">
             <div className="page-title-row">
@@ -2952,11 +2952,13 @@ export default function Home() {
               trackProgress={trackProgress}
               onOpenReport={openReportInReader}
               onOpenTrack={openTrackInRoadmap}
+              insights={insightsQuery.data ?? null}
+              onRefreshInsights={refreshInsights}
+              refreshing={refreshInsightsMutation.isPending || insightsQuery.isFetching}
             />
           </section>
         )}
 
-        {/* View 7: Document-to-Diagram (Диаграм) */}
         {activeNav === "Диаграм" && (
           <section className="simple-page">
             <div className="page-title-row">
@@ -3106,12 +3108,25 @@ export default function Home() {
               }}
               onOpenReport={openReportInReader}
               exportName={diagramReport?.title ?? diagramTrack?.name ?? "diagram"}
+              editKeyName={
+                diagramSource.type === "report"
+                  ? editKey.report(diagramReport?.id ?? 0, diagramKind)
+                  : editKey.track(diagramSource.id)
+              }
+              aiInsight={diagramAiInsight}
+              onRefreshInsights={refreshInsights}
+              refreshing={refreshInsightsMutation.isPending || insightsQuery.isFetching}
             />
+          </section>
+        )}
+
+        {activeNav === "Дүн шинжилгээ" && (
+          <section className="simple-page">
+            <InsightsDashboard reports={visibleReports} onOpenReport={openReportInReader} ai={aiSummary} />
           </section>
         )}
       </main>
 
-      {/* MODAL 1: Report Creator / Editor */}
       {editorOpen && (
         <div
           className="editor-overlay"
@@ -3249,7 +3264,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* MODAL 2: Playbook Viewer */}
       {selectedPlaybook && (
         <div
           className="center-modal-overlay"
@@ -3324,7 +3338,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* MODAL 3: Playbook Creator */}
       {playbookEditorOpen && (
         <div
           className="center-modal-overlay"
@@ -3418,7 +3431,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* MODAL 4: Global Search / Command Palette (Ctrl+K) */}
       {commandPaletteOpen && (
         <div
           className="center-modal-overlay"
@@ -3526,7 +3538,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* MODAL 5: User Profile & Workspace Settings */}
       {profileOpen && (
         <div
           className="center-modal-overlay"
@@ -3699,7 +3710,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* MODAL 6: Report Delete Confirmation */}
       {deleteConfirmId && (
         <div
           className="center-modal-overlay"
@@ -3739,10 +3749,6 @@ export default function Home() {
   );
 }
 
-// 18-week activity grid. The previous version was a fixed pseudo-random
-// pattern; now every cell reflects real report dates (a day with 1, 2, or
-// 3+ reports lights up). The decorative fallback only appears when the
-// workspace has no parseable dates at all.
 function Heatmap({ reports }: { reports: Report[] }) {
   const cells = useMemo(() => {
     const WEEKS = 18;
@@ -3757,16 +3763,11 @@ function Heatmap({ reports }: { reports: Report[] }) {
     }
     const hasRealData = perDay.size > 0;
 
-    // Build the 18×7 grid so columns are weeks (Mon–Sun) and today lands on
-    // its correct day-of-week in the final column.
     const today = new Date();
     const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const firstMondayOffset = (start.getDay() + 6) % 7; // Monday-first dow
-    // Monday of the week containing today, minus (WEEKS-1) weeks.
+    const firstMondayOffset = (start.getDay() + 6) % 7;
     start.setDate(start.getDate() - ((WEEKS - 1) * DAYS_PER_WEEK + firstMondayOffset));
 
-    // CSS grid fills row-major (18 columns), so emit day-of-week first and
-    // week second to keep columns = weeks.
     const out: { level: string; label: string }[] = [];
     for (let dow = 0; dow < DAYS_PER_WEEK; dow++) {
       for (let week = 0; week < WEEKS; week++) {
