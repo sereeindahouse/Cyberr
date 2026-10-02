@@ -3780,6 +3780,7 @@ export default function Home() {
       <QuickPentestHUD
         config={pentestConfig}
         onUpdateConfig={handleUpdatePentestConfig}
+        hidden={editorOpen || chatOpen || playbookEditorOpen}
         onOpenPentestHub={sub => {
           if (sub) setPentestSubTab(sub as any);
           setActiveNav("Пентест");
